@@ -4,20 +4,20 @@ branches:
   main:
     regex: ^master$|^main$
     mode: ContinuousDeployment
-    tag: ci
+    label: ci
     increment: Patch
   feature:
     regex: ^features?[/-]
     mode: ContinuousDeployment
-    tag: alpha
+    label: alpha
     increment: Minor
   fix:
     regex: ^(bug)?fix(es)?[/-]
     mode: ContinuousDeployment
-    tag: beta
+    label: beta
     increment: Patch
   pull-request:
     regex: ^(pull|pull\-requests|pr)[/-]
     mode: ContinuousDeployment
-    tag: pr
+    label: pr
     increment: Inherit
