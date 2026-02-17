@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-Digiplex.Worker-87d3ae5a-4d1d-45bb-a3ce-5b939a6968d7</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Digiplex.Core\Digiplex.Core.csproj" />
+    <ProjectReference Include="..\Digiplex.Serial\Digiplex.Serial.csproj" />
+    <ProjectReference Include="..\Digiplex.Mqtt\Digiplex.Mqtt.csproj" />
+  </ItemGroup>
+</Project>
