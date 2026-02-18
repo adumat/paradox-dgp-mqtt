@@ -3,12 +3,12 @@ services:
     image: ghcr.io/adumat/digiplex2mqtt:${IMAGE_TAG:-latest}
     container_name: digiplex
     restart: unless-stopped
-    # devices:
-    #   - ${SERIAL_DEVICE:-/dev/ttyUSB0}:${SERIAL_DEVICE:-/dev/ttyUSB0}
+    devices:
+      - ${SERIAL_DEVICE:-/dev/ttyUSB0}:${SERIAL_DEVICE:-/dev/ttyUSB0}
     environment:
       - Serilog__MinimumLevel__Default=${LOG_MIN_LEVEL:-Information}
       - Serial__PortName=${SERIAL_DEVICE:-/dev/ttyUSB0}
-      - Serial__Password=${SERIAL_PASSWORD:-0000}
+      - Serial__Password=${SERIAL_PASSWORD:-1234}
       - Serial__BaudRate=${SERIAL_BAUD_RATE:-19200}
       - Serial__PollIntervalMs=${SERIAL_POLL_INTERVAL_MS:-1000}
       - Serial__UseMock=${USE_MOCK:-false}
@@ -18,6 +18,9 @@ services:
       - Mqtt__Password=${MQTT_PASSWORD:-}
       - Mqtt__TopicPrefix=${MQTT_TOPIC_PREFIX:-digiplex}
       - Mqtt__EnableHomeAssistantDiscovery=${MQTT_HA_DISCOVERY:-true}
+    dns:
+      - 192.168.1.3
+    dns_search: lan
 
   mosquitto:
     image: eclipse-mosquitto:2

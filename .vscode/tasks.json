@@ -58,6 +58,19 @@
       "detail": "Sync files, pull images and restart on remote server"
     },
     {
+      "label": "stop-remote",
+      "type": "shell",
+      "command": "ssh",
+      "args": [
+        "${input:remoteUser}@${input:remoteHost}",
+        "cd ~/digiplex2mqtt && docker compose down"
+      ],
+      "dependsOn": "sync-remote",
+      "problemMatcher": [],
+      "group": "build",
+      "detail": "Sync files, pull images and restart on remote server"
+    },
+    {
       "label": "remote-logs",
       "type": "shell",
       "command": "ssh",
