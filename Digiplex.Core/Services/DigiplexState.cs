@@ -39,7 +39,8 @@ public class DigiplexState : IDigiplexState, IDisposable
   public IObservable<PartitionCommand> PartitionCommandRequested => _partitionCommandSubject.AsObservable();
 
   public SystemStatus? SystemStatus => _systemStatus;
-  public IObservable<SystemStatus> SystemStatusChanged => _systemStatusSubject.AsObservable();
+  public IObservable<SystemStatus> SystemStatusChanged => _systemStatusSubject
+      .DistinctUntilChanged(s => (s.Vdc, s.BatteryVoltage, s.DcCurrent, s.TroubleFlags));
 
   public IReadOnlyDictionary<string, Dictionary<int, string>> Labels => _labels;
 
@@ -182,18 +183,8 @@ public class DigiplexState : IDigiplexState, IDisposable
   /// </summary>
   public void UpdateSystemStatus(byte[] data)
   {
-    var newStatus = Models.SystemStatus.ParseFromData(data);
-
-    // Only emit if values actually changed (avoid spamming on every poll)
-    if (_systemStatus == null ||
-        _systemStatus.Vdc != newStatus.Vdc ||
-        _systemStatus.BatteryVoltage != newStatus.BatteryVoltage ||
-        _systemStatus.TroubleFlags != newStatus.TroubleFlags ||
-        Math.Abs((_systemStatus.PanelTime - newStatus.PanelTime).TotalSeconds) >= 2)
-    {
-      _systemStatus = newStatus;
-      _systemStatusSubject.OnNext(newStatus);
-    }
+    _systemStatus = Models.SystemStatus.ParseFromData(data);
+    _systemStatusSubject.OnNext(_systemStatus);
   }
 
   /// <summary>

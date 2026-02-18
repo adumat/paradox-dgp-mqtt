@@ -170,7 +170,7 @@ public class MqttService : IMqttService
     }
   }
 
-  private Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args)
+  private async Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args)
   {
     var topic = args.ApplicationMessage.Topic;
     var payloadBytes = args.ApplicationMessage.Payload;
@@ -179,10 +179,10 @@ public class MqttService : IMqttService
     _logger.LogDebug("Received message on {Topic}: {Payload}", topic, payload);
 
     // Handle partition commands: {prefix}/partition/{id}/set
-    var prefix = $"{_options.TopicPrefix}/partition/";
-    if (topic.StartsWith(prefix) && topic.EndsWith("/set"))
+    var partitionPrefix = $"{_options.TopicPrefix}/partition/";
+    if (topic.StartsWith(partitionPrefix) && topic.EndsWith("/set"))
     {
-      var idStr = topic[prefix.Length..^4]; // extract id between prefix and /set
+      var idStr = topic[partitionPrefix.Length..^4]; // extract id between prefix and /set
       if (int.TryParse(idStr, out var partitionId) && partitionId >= 1 && partitionId <= 8)
       {
         var command = MapHaCommandToMonitoring(payload);
@@ -199,7 +199,15 @@ public class MqttService : IMqttService
       }
     }
 
-    return Task.CompletedTask;
+    // Handle panel time request: {prefix}/panel/time/get
+    if (topic == $"{_options.TopicPrefix}/panel/time/get")
+    {
+      var systemStatus = _state.SystemStatus;
+      if (systemStatus != null)
+      {
+        await PublishAsync($"{_options.TopicPrefix}/panel/time", systemStatus.PanelTime.ToString("o"), false);
+      }
+    }
   }
 
   private static byte? MapHaCommandToMonitoring(string haCommand)
@@ -235,6 +243,7 @@ public class MqttService : IMqttService
   {
     var subscribeOptions = new MqttClientSubscribeOptionsBuilder()
         .WithTopicFilter($"{_options.TopicPrefix}/+/+/set")
+        .WithTopicFilter($"{_options.TopicPrefix}/+/+/get")
         .Build();
 
     await _client!.SubscribeAsync(subscribeOptions, cancellationToken);
@@ -296,7 +305,6 @@ public class MqttService : IMqttService
         vdc = status.Vdc,
         battery = status.BatteryVoltage,
         dc_current = status.DcCurrent,
-        panel_time = status.PanelTime.ToString("o"),
         trouble = status.TroubleFlags
       }, JsonOptions);
 
@@ -307,7 +315,6 @@ public class MqttService : IMqttService
       await PublishAsync($"{_options.TopicPrefix}/panel/battery", status.BatteryVoltage.ToString("F1"), true);
       await PublishAsync($"{_options.TopicPrefix}/panel/dc_current", status.DcCurrent.ToString(), true);
       await PublishAsync($"{_options.TopicPrefix}/panel/trouble", status.TroubleFlags.ToString(), true);
-      await PublishAsync($"{_options.TopicPrefix}/panel/time", status.PanelTime.ToString("o"), true);
     }));
 
     // Subscribe to panel info changes
