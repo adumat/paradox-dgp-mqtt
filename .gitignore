@@ -24,7 +24,7 @@ project.fragment.lock.json
 
 ## IDE
 .vs/
-.vscode/
+.vscode/mise-tools
 .idea/
 *.swp
 *~
@@ -32,6 +32,9 @@ project.fragment.lock.json
 ## OS
 .DS_Store
 Thumbs.db
+
+## Environment
+.env
 
 ## Project-specific
 appsettings.Development.json
