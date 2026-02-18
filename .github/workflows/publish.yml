@@ -41,10 +41,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Docker image
+      - name: Build and push release image
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: release
           push: true
           build-args: |
             VERSION=${{ steps.gitversion.outputs.semVer }}
@@ -53,5 +54,19 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           labels: |
             org.opencontainers.image.version=${{ steps.gitversion.outputs.semVer }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
+
+      - name: Build and push debug image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: debug
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.gitversion.outputs.semVer }}-debug
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:debug
+          labels: |
+            org.opencontainers.image.version=${{ steps.gitversion.outputs.semVer }}-debug
+          cache-from: type=gha,scope=debug
+          cache-to: type=gha,mode=max,scope=debug

@@ -1,9 +1,7 @@
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+# === Shared build stage ===
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build-base
 WORKDIR /src
 
-ARG VERSION=1.0.0
-
-# Copy csproj files and restore
 COPY Digiplex.Core/*.csproj Digiplex.Core/
 COPY Digiplex.Serial/*.csproj Digiplex.Serial/
 COPY Digiplex.Mqtt/*.csproj Digiplex.Mqtt/
@@ -11,26 +9,29 @@ COPY Digiplex.Worker/*.csproj Digiplex.Worker/
 COPY Digiplex.sln .
 RUN dotnet restore
 
-# Copy source and build
 COPY . .
+
+# === Release publish ===
+FROM build-base AS build-release
+ARG VERSION=1.0.0
 RUN dotnet publish Digiplex.Worker -c Release -o /app/publish --no-restore \
     /p:Version=${VERSION} \
     /p:AssemblyVersion=${VERSION}.0 \
     /p:FileVersion=${VERSION}.0 \
     /p:InformationalVersion=${VERSION}
 
-# Runtime image
-FROM mcr.microsoft.com/dotnet/runtime:9.0 AS runtime
+# === Debug publish ===
+FROM build-base AS build-debug
+RUN dotnet publish Digiplex.Worker -c Debug -o /app/publish --no-restore
+
+# === Shared runtime base ===
+FROM mcr.microsoft.com/dotnet/runtime:9.0 AS runtime-base
 WORKDIR /app
 
-# Install serial port dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /app/publish .
-
-# Default configuration via environment variables
 ENV Serial__PortName=/dev/ttyUSB0
 ENV Serial__BaudRate=19200
 ENV Serial__Password=0000
@@ -43,4 +44,16 @@ ENV Mqtt__EnableHomeAssistantDiscovery=true
 LABEL org.opencontainers.image.source=https://github.com/adumat/digiplex2mqtt
 LABEL org.opencontainers.image.description="Digiplex alarm panel to MQTT bridge"
 
+# === Release runtime (default target) ===
+FROM runtime-base AS release
+COPY --from=build-release /app/publish .
+ENTRYPOINT ["dotnet", "Digiplex.Worker.dll"]
+
+# === Debug runtime ===
+FROM runtime-base AS debug
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && curl -sSL https://aka.ms/getvsdbgsh | bash /dev/stdin -v latest -l /vsdbg \
+    && apt-get purge -y curl && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build-debug /app/publish .
 ENTRYPOINT ["dotnet", "Digiplex.Worker.dll"]

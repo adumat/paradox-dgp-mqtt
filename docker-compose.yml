@@ -1,24 +1,29 @@
 services:
   digiplex:
-    build: .
+    image: ghcr.io/adumat/digiplex2mqtt:${IMAGE_TAG:-latest}
     container_name: digiplex
     restart: unless-stopped
     devices:
-      - /dev/ttyUSB0:/dev/ttyUSB0
+      - ${SERIAL_DEVICE:-/dev/ttyUSB0}:${SERIAL_DEVICE:-/dev/ttyUSB0}
     environment:
-      - Serial__PortName=/dev/ttyUSB0
-      - Serial__Password=0000
-      - Mqtt__BrokerHost=mosquitto
-      - Mqtt__BrokerPort=1883
-    depends_on:
-      - mosquitto
+      - Serial__PortName=${SERIAL_DEVICE:-/dev/ttyUSB0}
+      - Serial__Password=${SERIAL_PASSWORD:-0000}
+      - Serial__BaudRate=${SERIAL_BAUD_RATE:-19200}
+      - Serial__PollIntervalMs=${SERIAL_POLL_INTERVAL_MS:-1000}
+      - Serial__UseMock=${USE_MOCK:-false}
+      - Mqtt__BrokerHost=${MQTT_BROKER_HOST:-mosquitto}
+      - Mqtt__BrokerPort=${MQTT_BROKER_PORT:-1883}
+      - Mqtt__TopicPrefix=${MQTT_TOPIC_PREFIX:-digiplex}
+      - Mqtt__EnableHomeAssistantDiscovery=${MQTT_HA_DISCOVERY:-true}
 
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: mosquitto
     restart: unless-stopped
+    profiles:
+      - mosquitto
     ports:
-      - "1883:1883"
+      - "${MQTT_PORT:-1883}:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
       - mosquitto_data:/mosquitto/data

@@ -1,0 +1,55 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "remoteHost",
+      "type": "promptString",
+      "description": "Remote host (IP or hostname)",
+      "default": "192.168.1.100"
+    },
+    {
+      "id": "remoteUser",
+      "type": "promptString",
+      "description": "SSH user on remote host",
+      "default": "root"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "deploy-remote",
+      "type": "shell",
+      "command": "ssh",
+      "args": [
+        "${input:remoteUser}@${input:remoteHost}",
+        "cd /opt/digiplex2mqtt && docker compose pull && docker compose up -d"
+      ],
+      "problemMatcher": [],
+      "group": "build",
+      "detail": "Pull latest images and restart on remote server"
+    },
+    {
+      "label": "remote-logs",
+      "type": "shell",
+      "command": "ssh",
+      "args": [
+        "${input:remoteUser}@${input:remoteHost}",
+        "docker logs -f digiplex"
+      ],
+      "problemMatcher": [],
+      "isBackground": true,
+      "detail": "Stream logs from the remote digiplex container"
+    },
+    {
+      "label": "remote-shell",
+      "type": "shell",
+      "command": "ssh",
+      "args": [
+        "-t",
+        "${input:remoteUser}@${input:remoteHost}",
+        "docker exec -it digiplex /bin/bash"
+      ],
+      "problemMatcher": [],
+      "detail": "Open a shell in the remote digiplex container"
+    }
+  ]
+}

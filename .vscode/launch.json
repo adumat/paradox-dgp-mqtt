@@ -1,0 +1,39 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to Remote Container",
+      "type": "coreclr",
+      "request": "attach",
+      "processId": "1",
+      "pipeTransport": {
+        "pipeProgram": "ssh",
+        "pipeArgs": [
+          "-T",
+          "${input:remoteUser}@${input:remoteHost}",
+          "docker", "exec", "-i", "digiplex"
+        ],
+        "debuggerPath": "/vsdbg/vsdbg",
+        "pipeCwd": "${workspaceFolder}"
+      },
+      "sourceFileMap": {
+        "/src": "${workspaceFolder}"
+      },
+      "justMyCode": true
+    }
+  ],
+  "inputs": [
+    {
+      "id": "remoteHost",
+      "type": "promptString",
+      "description": "Remote host (IP or hostname)",
+      "default": "192.168.1.100"
+    },
+    {
+      "id": "remoteUser",
+      "type": "promptString",
+      "description": "SSH user on remote host",
+      "default": "root"
+    }
+  ]
+}
