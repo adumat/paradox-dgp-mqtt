@@ -38,6 +38,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -46,6 +49,7 @@ jobs:
         with:
           context: .
           target: release
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             VERSION=${{ steps.gitversion.outputs.semVer }}
@@ -62,6 +66,7 @@ jobs:
         with:
           context: .
           target: debug
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.gitversion.outputs.semVer }}-debug

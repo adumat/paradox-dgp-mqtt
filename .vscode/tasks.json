@@ -16,16 +16,46 @@
   ],
   "tasks": [
     {
+      "label": "sync-remote-mkdir",
+      "type": "shell",
+      "command": "ssh",
+      "args": [
+        "${input:remoteUser}@${input:remoteHost}",
+        "mkdir -p ~/digiplex2mqtt/mosquitto"
+      ],
+      "problemMatcher": [],
+      "detail": "Create remote directory structure"
+    },
+    {
+      "label": "sync-remote",
+      "type": "shell",
+      "command": "rsync",
+      "args": [
+        "-av",
+        "docker-compose.yml",
+        "mosquitto/",
+        ".env",
+        "${input:remoteUser}@${input:remoteHost}:~/digiplex2mqtt/"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "sync-remote-mkdir",
+      "problemMatcher": [],
+      "detail": "Sync compose and config files to remote server"
+    },
+    {
       "label": "deploy-remote",
       "type": "shell",
       "command": "ssh",
       "args": [
         "${input:remoteUser}@${input:remoteHost}",
-        "cd /opt/digiplex2mqtt && docker compose pull && docker compose up -d"
+        "cd ~/digiplex2mqtt && docker compose pull && docker compose up -d"
       ],
+      "dependsOn": "sync-remote",
       "problemMatcher": [],
       "group": "build",
-      "detail": "Pull latest images and restart on remote server"
+      "detail": "Sync files, pull images and restart on remote server"
     },
     {
       "label": "remote-logs",
@@ -33,7 +63,7 @@
       "command": "ssh",
       "args": [
         "${input:remoteUser}@${input:remoteHost}",
-        "docker logs -f digiplex"
+        "docker logs -f ~/digiplex2mqtt/digiplex"
       ],
       "problemMatcher": [],
       "isBackground": true,
