@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Digiplex.Core.Models;
 using Digiplex.Core.Services;
@@ -37,7 +38,8 @@ public class MqttService : IMqttService
   private static readonly JsonSerializerOptions JsonOptions = new()
   {
     PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-    WriteIndented = false
+    WriteIndented = false,
+    Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
   };
 
   public bool IsConnected => _client?.IsConnected ?? false;

@@ -12,7 +12,7 @@ public class SerialOptions
 {
   public string PortName { get; set; } = "/dev/ttyUSB0";
   public int BaudRate { get; set; } = ProtocolConstants.DefaultBaudRate;
-  public string Password { get; set; } = "0000";
+  public string Password { get; set; } = "1234";
   public int PollIntervalMs { get; set; } = 1000;
   public int ReadTimeoutMs { get; set; } = 1000;
   public int MaxRetries { get; set; } = 5;
@@ -312,7 +312,7 @@ public class SerialService : ISerialService
     const int startAddress = 0x2000;
     const int endAddress = 0x22F0;
 
-    var zoneIndex = 0;
+    var zoneIndex = 1;
     for (var addr = startAddress; addr < endAddress; addr += labelSize)
     {
       var readPdu = new ReadRequestPdu
