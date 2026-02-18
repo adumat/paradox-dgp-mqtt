@@ -3,8 +3,12 @@ using Digiplex.Core.Services;
 using Digiplex.Mqtt;
 using Digiplex.Serial;
 using Digiplex.Worker;
+using Serilog;
 
 var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddSerilog(config =>
+  config.ReadFrom.Configuration(builder.Configuration));
 
 // Configuration
 builder.Services.Configure<SerialOptions>(builder.Configuration.GetSection("Serial"));

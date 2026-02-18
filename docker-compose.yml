@@ -3,9 +3,10 @@ services:
     image: ghcr.io/adumat/digiplex2mqtt:${IMAGE_TAG:-latest}
     container_name: digiplex
     restart: unless-stopped
-    devices:
-      - ${SERIAL_DEVICE:-/dev/ttyUSB0}:${SERIAL_DEVICE:-/dev/ttyUSB0}
+    # devices:
+    #   - ${SERIAL_DEVICE:-/dev/ttyUSB0}:${SERIAL_DEVICE:-/dev/ttyUSB0}
     environment:
+      - Serilog__MinimumLevel__Default=${LOG_MIN_LEVEL:-Information}
       - Serial__PortName=${SERIAL_DEVICE:-/dev/ttyUSB0}
       - Serial__Password=${SERIAL_PASSWORD:-0000}
       - Serial__BaudRate=${SERIAL_BAUD_RATE:-19200}
