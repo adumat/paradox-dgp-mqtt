@@ -13,6 +13,8 @@ services:
       - Serial__UseMock=${USE_MOCK:-false}
       - Mqtt__BrokerHost=${MQTT_BROKER_HOST:-mosquitto}
       - Mqtt__BrokerPort=${MQTT_BROKER_PORT:-1883}
+      - Mqtt__Username=${MQTT_USERNAME:-}
+      - Mqtt__Password=${MQTT_PASSWORD:-}
       - Mqtt__TopicPrefix=${MQTT_TOPIC_PREFIX:-digiplex}
       - Mqtt__EnableHomeAssistantDiscovery=${MQTT_HA_DISCOVERY:-true}
 

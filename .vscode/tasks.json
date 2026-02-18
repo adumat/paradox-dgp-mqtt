@@ -63,7 +63,7 @@
       "command": "ssh",
       "args": [
         "${input:remoteUser}@${input:remoteHost}",
-        "docker logs -f ~/digiplex2mqtt/digiplex"
+        "docker logs -f digiplex"
       ],
       "problemMatcher": [],
       "isBackground": true,

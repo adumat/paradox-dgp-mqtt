@@ -103,6 +103,11 @@ public class MqttService : IMqttService
   {
     var optionsBuilder = new MqttClientOptionsBuilder()
         .WithTcpServer(_options.BrokerHost, _options.BrokerPort)
+        .WithTlsOptions(new MqttClientTlsOptions
+        {
+          UseTls = _options.BrokerPort == 8883, // Assume TLS if using standard secure MQTT port
+          AllowUntrustedCertificates = false, // Adjust as needed for production
+        })
         .WithClientId(_options.ClientId)
         .WithWillTopic($"{_options.TopicPrefix}/status")
         .WithWillPayload("offline"u8.ToArray())
