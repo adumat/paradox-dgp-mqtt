@@ -178,11 +178,57 @@ public class MqttService : IMqttService
 
     _logger.LogDebug("Received message on {Topic}: {Payload}", topic, payload);
 
-    // Handle commands
-    // Future: implement arm/disarm commands here
-    // e.g., digiplex/partition/1/arm/set
+    // Handle partition commands: {prefix}/partition/{id}/set
+    var prefix = $"{_options.TopicPrefix}/partition/";
+    if (topic.StartsWith(prefix) && topic.EndsWith("/set"))
+    {
+      var idStr = topic[prefix.Length..^4]; // extract id between prefix and /set
+      if (int.TryParse(idStr, out var partitionId) && partitionId >= 1 && partitionId <= 8)
+      {
+        var command = MapHaCommandToMonitoring(payload);
+        if (command.HasValue)
+        {
+          _logger.LogInformation("Partition {Id} command: {Payload} → 0x{Cmd:X2}",
+              partitionId, payload, command.Value);
+          _state.RequestPartitionCommand(new PartitionCommand(partitionId, command.Value));
+        }
+        else
+        {
+          _logger.LogWarning("Unknown partition command: {Payload}", payload);
+        }
+      }
+    }
 
     return Task.CompletedTask;
+  }
+
+  private static byte? MapHaCommandToMonitoring(string haCommand)
+  {
+    return haCommand.ToUpperInvariant() switch
+    {
+      "ARM_AWAY" => MonitoringCommands.FullArm,
+      "ARM_HOME" => MonitoringCommands.StayArm,
+      "ARM_NIGHT" => MonitoringCommands.InstantArm,
+      "ARM_CUSTOM_BYPASS" => MonitoringCommands.ForceArm,
+      "DISARM" => MonitoringCommands.Disarm,
+      _ => null
+    };
+  }
+
+  private static string MapToHaState(PartitionStatus status)
+  {
+    if (status.InAlarm) return "triggered";
+    if (status.ExitDelay) return "arming";
+    if (status.EntryDelay) return "pending";
+
+    return status.ArmState switch
+    {
+      ArmState.Armed => "armed_away",
+      ArmState.StayArmed => "armed_home",
+      ArmState.InstantArmed => "armed_night",
+      ArmState.ForceArmed => "armed_custom_bypass",
+      _ => "disarmed"
+    };
   }
 
   private async Task SubscribeToCommandsAsync(CancellationToken cancellationToken)
@@ -230,10 +276,38 @@ public class MqttService : IMqttService
         label = evt.NewStatus.Label,
         arm_state = evt.NewStatus.ArmState.ToString().ToLower(),
         in_alarm = evt.NewStatus.InAlarm,
-        ready = evt.NewStatus.Ready
+        ready = evt.NewStatus.Ready,
+        exit_delay = evt.NewStatus.ExitDelay,
+        entry_delay = evt.NewStatus.EntryDelay
       }, JsonOptions);
 
       await PublishAsync(topic, payload, true);
+
+      // Publish HA alarm state string
+      var haState = MapToHaState(evt.NewStatus);
+      await PublishAsync($"{topic}/state", haState, true);
+    }));
+
+    // Subscribe to system status changes
+    _subscriptions.Add(_state.SystemStatusChanged.Subscribe(async status =>
+    {
+      var payload = JsonSerializer.Serialize(new
+      {
+        vdc = status.Vdc,
+        battery = status.BatteryVoltage,
+        dc_current = status.DcCurrent,
+        panel_time = status.PanelTime.ToString("o"),
+        trouble = status.TroubleFlags
+      }, JsonOptions);
+
+      await PublishAsync($"{_options.TopicPrefix}/panel/status", payload, true);
+
+      // Publish individual sensor values for HA
+      await PublishAsync($"{_options.TopicPrefix}/panel/vdc", status.Vdc.ToString("F1"), true);
+      await PublishAsync($"{_options.TopicPrefix}/panel/battery", status.BatteryVoltage.ToString("F1"), true);
+      await PublishAsync($"{_options.TopicPrefix}/panel/dc_current", status.DcCurrent.ToString(), true);
+      await PublishAsync($"{_options.TopicPrefix}/panel/trouble", status.TroubleFlags.ToString(), true);
+      await PublishAsync($"{_options.TopicPrefix}/panel/time", status.PanelTime.ToString("o"), true);
     }));
 
     // Subscribe to panel info changes
@@ -266,9 +340,22 @@ public class MqttService : IMqttService
     _logger.LogDebug("Published to {Topic}: {Payload}", topic, payload);
   }
 
+  private object GetDeviceConfig()
+  {
+    return new
+    {
+      identifiers = new[] { $"digiplex_{_state.PanelInfo?.ModuleSerialNumber}" },
+      name = "Digiplex Panel",
+      manufacturer = "Paradox",
+      model = _state.PanelInfo?.GetProductName() ?? "Unknown"
+    };
+  }
+
   private async Task PublishHomeAssistantDiscoveryAsync(CancellationToken cancellationToken)
   {
     _logger.LogInformation("Publishing Home Assistant discovery config");
+
+    var device = GetDeviceConfig();
 
     // Publish discovery for each known zone
     foreach (var (zoneId, zone) in _state.Zones)
@@ -282,16 +369,95 @@ public class MqttService : IMqttService
         device_class = "motion",
         payload_on = "ON",
         payload_off = "OFF",
-        device = new
-        {
-          identifiers = new[] { $"digiplex_{_state.PanelInfo?.ModuleSerialNumber}" },
-          name = "Digiplex Panel",
-          manufacturer = "Paradox",
-          model = _state.PanelInfo?.GetProductName() ?? "Unknown"
-        }
+        availability_topic = $"{_options.TopicPrefix}/status",
+        device
       };
 
       var topic = $"{_options.HomeAssistantDiscoveryPrefix}/binary_sensor/digiplex/zone_{zoneId}/config";
+      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+    }
+
+    // Publish discovery for each known partition (alarm_control_panel)
+    foreach (var (partitionId, partition) in _state.Partitions)
+    {
+      var config = new
+      {
+        name = string.IsNullOrEmpty(partition.Label) ? $"Partition {partitionId}" : partition.Label,
+        unique_id = $"digiplex_partition_{partitionId}",
+        state_topic = $"{_options.TopicPrefix}/partition/{partitionId}/state",
+        command_topic = $"{_options.TopicPrefix}/partition/{partitionId}/set",
+        json_attributes_topic = $"{_options.TopicPrefix}/partition/{partitionId}",
+        availability_topic = $"{_options.TopicPrefix}/status",
+        supported_features = new[] { "arm_away", "arm_home", "arm_night", "arm_custom_bypass" },
+        device
+      };
+
+      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/alarm_control_panel/digiplex/partition_{partitionId}/config";
+      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+    }
+
+    // Publish discovery for panel voltage sensor
+    {
+      var config = new
+      {
+        name = "Panel Voltage",
+        unique_id = "digiplex_panel_vdc",
+        state_topic = $"{_options.TopicPrefix}/panel/vdc",
+        device_class = "voltage",
+        unit_of_measurement = "V",
+        availability_topic = $"{_options.TopicPrefix}/status",
+        device
+      };
+
+      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/sensor/digiplex/panel_vdc/config";
+      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+    }
+
+    // Publish discovery for battery voltage sensor
+    {
+      var config = new
+      {
+        name = "Battery Voltage",
+        unique_id = "digiplex_panel_battery",
+        state_topic = $"{_options.TopicPrefix}/panel/battery",
+        device_class = "voltage",
+        unit_of_measurement = "V",
+        availability_topic = $"{_options.TopicPrefix}/status",
+        device
+      };
+
+      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/sensor/digiplex/panel_battery/config";
+      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+    }
+
+    // Publish discovery for DC current sensor
+    {
+      var config = new
+      {
+        name = "DC Current",
+        unique_id = "digiplex_panel_dc_current",
+        state_topic = $"{_options.TopicPrefix}/panel/dc_current",
+        device_class = "current",
+        availability_topic = $"{_options.TopicPrefix}/status",
+        device
+      };
+
+      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/sensor/digiplex/panel_dc_current/config";
+      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+    }
+
+    // Publish discovery for trouble flags sensor
+    {
+      var config = new
+      {
+        name = "Trouble Flags",
+        unique_id = "digiplex_panel_trouble",
+        state_topic = $"{_options.TopicPrefix}/panel/trouble",
+        availability_topic = $"{_options.TopicPrefix}/status",
+        device
+      };
+
+      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/sensor/digiplex/panel_trouble/config";
       await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
     }
   }

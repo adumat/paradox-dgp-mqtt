@@ -42,6 +42,13 @@ public class DigiplexWorker : BackgroundService
       }
     });
 
+    _state.PartitionChanged.Subscribe(evt =>
+    {
+      _logger.LogInformation("Partition {Id} ({Label}): {ArmState}, Alarm={Alarm}, Ready={Ready}",
+              evt.PartitionId, evt.NewStatus.Label, evt.NewStatus.ArmState,
+              evt.NewStatus.InAlarm, evt.NewStatus.Ready);
+    });
+
     try
     {
       // Start MQTT service first

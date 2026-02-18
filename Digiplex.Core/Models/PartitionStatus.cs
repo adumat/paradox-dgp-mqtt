@@ -22,7 +22,14 @@ public record PartitionStatus
   public ArmState ArmState { get; init; }
   public bool InAlarm { get; init; }
   public bool Ready { get; init; }
+  public bool ExitDelay { get; init; }
+  public bool EntryDelay { get; init; }
 }
+
+/// <summary>
+/// Command to send to a partition (arm/disarm)
+/// </summary>
+public record PartitionCommand(int PartitionId, byte Command);
 
 /// <summary>
 /// Collection of all partition statuses

@@ -71,6 +71,21 @@ public interface IDigiplexState
   IObservable<PartitionChangedEvent> PartitionChanged { get; }
 
   /// <summary>
+  /// Observable for partition arm/disarm command requests
+  /// </summary>
+  IObservable<PartitionCommand> PartitionCommandRequested { get; }
+
+  /// <summary>
+  /// Current system status (voltages, date/time, trouble flags)
+  /// </summary>
+  SystemStatus? SystemStatus { get; }
+
+  /// <summary>
+  /// Observable for system status changes
+  /// </summary>
+  IObservable<SystemStatus> SystemStatusChanged { get; }
+
+  /// <summary>
   /// Labels loaded from panel
   /// </summary>
   IReadOnlyDictionary<string, Dictionary<int, string>> Labels { get; }

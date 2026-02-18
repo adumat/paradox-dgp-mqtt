@@ -16,8 +16,9 @@ public class SerialOptions
   public int PollIntervalMs { get; set; } = 1000;
   public int ReadTimeoutMs { get; set; } = 1000;
   public int MaxRetries { get; set; } = 5;
+  public int ZoneCount { get; set; } = 48;
+  public int PartitionCount { get; set; } = 4;
   public bool UseMock { get; set; }
-  public int MockZoneCount { get; set; } = 16;
   public double MockZoneToggleProbability { get; set; } = 0.05;
 }
 
@@ -34,6 +35,7 @@ public class SerialService : ISerialService
   private SerialPort? _serialPort;
   private CancellationTokenSource? _cts;
   private Task? _pollingTask;
+  private IDisposable? _commandSubscription;
   private readonly SemaphoreSlim _sendLock = new(1, 1);
 
   private static readonly byte[] InitString =
@@ -84,6 +86,20 @@ public class SerialService : ISerialService
       // Initialize connection
       await InitializeConnectionAsync(cancellationToken);
 
+      // Subscribe to partition commands
+      _commandSubscription = _state.PartitionCommandRequested.Subscribe(async cmd =>
+      {
+        try
+        {
+          await SendPartitionCommandAsync(cmd);
+        }
+        catch (Exception ex)
+        {
+          _logger.LogError(ex, "Error sending partition command {Command} to partition {Partition}",
+              cmd.Command, cmd.PartitionId);
+        }
+      });
+
       // Start polling loop
       _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
       _pollingTask = Task.Run(() => PollingLoopAsync(_cts.Token), _cts.Token);
@@ -99,6 +115,9 @@ public class SerialService : ISerialService
   public async Task StopAsync(CancellationToken cancellationToken = default)
   {
     _logger.LogInformation("Stopping serial service");
+
+    _commandSubscription?.Dispose();
+    _commandSubscription = null;
 
     if (_cts != null)
     {
@@ -272,18 +291,46 @@ public class SerialService : ISerialService
       try
       {
         // Poll zone status at RAM address 0x153
-        var readPdu = new ReadRequestPdu
+        var zonePdu = new ReadRequestPdu
         {
           Count = 12,
           BusAddress = 0,
           Address = MemoryAddress.Ram(0x153)
         };
 
-        var response = await SendAndReceiveAsync(readPdu, cancellationToken);
-
-        if (response is ReadResponsePdu readResponse)
+        var zoneResponse = await SendAndReceiveAsync(zonePdu, cancellationToken);
+        if (zoneResponse is ReadResponsePdu zoneData)
         {
-          _state.UpdateZonesFromData(readResponse.Data);
+          _state.UpdateZonesFromData(zoneData.Data);
+        }
+
+        // Poll partition status at RAM address 0x195
+        var partitionPdu = new ReadRequestPdu
+        {
+          Count = 0,
+          BusAddress = 0,
+          Address = MemoryAddress.Ram(0x195)
+        };
+
+        var partitionResponse = await SendAndReceiveAsync(partitionPdu, cancellationToken);
+        if (partitionResponse is ReadResponsePdu partitionData)
+        {
+          _logger.LogDebug("Partition raw: {Data}", BitConverter.ToString(partitionData.Data[..21]));
+          _state.UpdatePartitionsFromData(partitionData.Data, _options.PartitionCount);
+        }
+
+        // Poll system info at RAM address 0x144
+        var systemPdu = new ReadRequestPdu
+        {
+          Count = 0,
+          BusAddress = 0,
+          Address = MemoryAddress.Ram(0x144)
+        };
+
+        var systemResponse = await SendAndReceiveAsync(systemPdu, cancellationToken);
+        if (systemResponse is ReadResponsePdu systemData)
+        {
+          _state.UpdateSystemStatus(systemData.Data);
         }
 
         await Task.Delay(_options.PollIntervalMs, cancellationToken);
@@ -303,17 +350,45 @@ public class SerialService : ISerialService
     _logger.LogInformation("Polling loop stopped");
   }
 
+  private async Task SendPartitionCommandAsync(PartitionCommand command)
+  {
+    _logger.LogInformation("Sending partition command {Command} to partition {Partition}",
+        command.Command, command.PartitionId);
+
+    // Build MonitorRequestPdu with command in the correct partition slot
+    var pdu = new MonitorRequestPdu
+    {
+      Partition1 = command.PartitionId == 1 ? command.Command : MonitoringCommands.Nop,
+      Partition2 = command.PartitionId == 2 ? command.Command : MonitoringCommands.Nop,
+      Partition3 = command.PartitionId == 3 ? command.Command : MonitoringCommands.Nop,
+      Partition4 = command.PartitionId == 4 ? command.Command : MonitoringCommands.Nop,
+    };
+
+    var response = await SendAndReceiveAsync(pdu);
+
+    if (response is MonitorResponsePdu monitorResponse)
+    {
+      _logger.LogDebug("Partition command response: P1={P1} P2={P2} P3={P3} P4={P4}",
+          monitorResponse.Partition1, monitorResponse.Partition2,
+          monitorResponse.Partition3, monitorResponse.Partition4);
+    }
+    else if (response is ErrorResponsePdu errorResponse)
+    {
+      _logger.LogWarning("Partition command error: {Error}", errorResponse.ErrorMessage);
+    }
+  }
+
   private async Task LoadLabelsAsync(CancellationToken cancellationToken)
   {
     _logger.LogInformation("Loading zone labels");
 
-    // Zone labels are at EEPROM 0x2000-0x22F0, 16 bytes each
+    // Zone labels are at EEPROM 0x2000, 16 bytes each
     const int labelSize = 16;
     const int startAddress = 0x2000;
-    const int endAddress = 0x22F0;
+    var zoneCount = Math.Clamp(_options.ZoneCount, 1, 48);
 
     var zoneIndex = 1;
-    for (var addr = startAddress; addr < endAddress; addr += labelSize)
+    for (var addr = startAddress; zoneIndex <= zoneCount; addr += labelSize)
     {
       var readPdu = new ReadRequestPdu
       {
@@ -340,7 +415,14 @@ public class SerialService : ISerialService
       zoneIndex++;
     }
 
-    _logger.LogInformation("Loaded {Count} zone labels", zoneIndex);
+    _logger.LogInformation("Loaded {Count} zone labels", zoneIndex - 1);
+
+    // Set default partition labels (EEPROM address unknown for DGP-848)
+    for (var i = 1; i <= _options.PartitionCount; i++)
+    {
+      _state.SetLabel("partition", i, $"Partition {i}");
+    }
+    _logger.LogInformation("Set {Count} default partition labels", _options.PartitionCount);
   }
 
   public async ValueTask DisposeAsync()
