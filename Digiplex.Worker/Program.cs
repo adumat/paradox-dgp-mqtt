@@ -1,3 +1,4 @@
+using Digiplex.Core.Models;
 using Digiplex.Core.Protocol;
 using Digiplex.Core.Services;
 using Digiplex.Mqtt;
@@ -12,6 +13,7 @@ builder.Services.AddSerilog(config =>
 
 // Configuration
 builder.Services.Configure<SerialOptions>(builder.Configuration.GetSection("Serial"));
+builder.Services.Configure<PartitionConfig>(builder.Configuration.GetSection("Partitions"));
 builder.Services.Configure<MqttOptions>(builder.Configuration.GetSection("Mqtt"));
 
 // Core services

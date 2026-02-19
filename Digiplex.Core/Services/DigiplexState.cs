@@ -14,6 +14,7 @@ public class DigiplexState : IDigiplexState, IDisposable
   private readonly Subject<ZoneChangedEvent> _zoneChangedSubject = new();
   private readonly Subject<PartitionChangedEvent> _partitionChangedSubject = new();
   private readonly Subject<PartitionCommand> _partitionCommandSubject = new();
+  private readonly Subject<MultiPartitionCommand> _multiPartitionCommandSubject = new();
   private readonly Subject<SystemStatus> _systemStatusSubject = new();
 
   private readonly Dictionary<int, ZoneStatus> _zones = new();
@@ -37,6 +38,7 @@ public class DigiplexState : IDigiplexState, IDisposable
   public IObservable<PartitionChangedEvent> PartitionChanged => _partitionChangedSubject.AsObservable();
 
   public IObservable<PartitionCommand> PartitionCommandRequested => _partitionCommandSubject.AsObservable();
+  public IObservable<MultiPartitionCommand> MultiPartitionCommandRequested => _multiPartitionCommandSubject.AsObservable();
 
   public SystemStatus? SystemStatus => _systemStatus;
   public IObservable<SystemStatus> SystemStatusChanged => _systemStatusSubject
@@ -123,34 +125,32 @@ public class DigiplexState : IDigiplexState, IDisposable
 
   /// <summary>
   /// Update partition statuses from raw data bytes (from RAM address 0x8195)
-  /// Data layout: Data[0]=header, then 4 partitions at 5-byte intervals starting at Data[1]
+  /// Data layout: 4 partitions at 5-byte blocks starting at Data[0]
   /// </summary>
   public void UpdatePartitionsFromData(byte[] data, int partitionCount)
   {
-    // Partition data: 5-byte blocks at offsets 1, 6, 11, 16
+    // Partition data: 5-byte blocks at offsets 0, 5, 10, 15
     for (var i = 0; i < partitionCount && i < 4; i++)
     {
-      var offset = 1 + (i * 5);
-      if (offset >= data.Length) break;
+      var offset = i * 5;
+      if (offset + 4 >= data.Length) break;
 
-      var statusByte0 = data[offset];
-      var statusByte1 = offset + 1 < data.Length ? data[offset + 1] : (byte)0;
-      var statusByte3 = offset + 3 < data.Length ? data[offset + 3] : (byte)0;
+      var armByte = data[offset];          // byte 0: arm/alarm flags
+      var statusByte = data[offset + 1];   // byte 1: ready, delays
+      var flagsByte = data[offset + 2];    // byte 2: additional flags
 
       // Byte 0 bits: arm(0), arm_sleep(1), arm_stay(2), [3], strobe_alarm(4), silent_alarm(5), audible_alarm(6), pulse_fire_alarm(7)
-      var armed = (statusByte0 & 0x01) != 0;
-      var armSleep = (statusByte0 & 0x02) != 0;
-      var armStay = (statusByte0 & 0x04) != 0;
-      var strobeAlarm = (statusByte0 & 0x10) != 0;
-      var silentAlarm = (statusByte0 & 0x20) != 0;
-      var audibleAlarm = (statusByte0 & 0x40) != 0;
+      var armed = (armByte & 0x01) != 0;
+      var armSleep = (armByte & 0x02) != 0;
+      var armStay = (armByte & 0x04) != 0;
+      var strobeAlarm = (armByte & 0x10) != 0;
+      var silentAlarm = (armByte & 0x20) != 0;
+      var audibleAlarm = (armByte & 0x40) != 0;
 
-      // Byte 1 bits: exit_delay(0), entry_delay(1), alarms_in_memory(2), zone_bypassed(3)
-      var exitDelay = (statusByte1 & 0x01) != 0;
-      var entryDelay = (statusByte1 & 0x02) != 0;
-
-      // Byte 3 bits: ready_status(0), arm_force(1), stay_mode_active(2)
-      var ready = (statusByte3 & 0x01) != 0;
+      // Byte 1 bits: ready(0), exit_delay(1), entry_delay(2)
+      var ready = (statusByte & 0x01) != 0;
+      var exitDelay = (statusByte & 0x02) != 0;
+      var entryDelay = (statusByte & 0x04) != 0;
 
       var inAlarm = strobeAlarm || silentAlarm || audibleAlarm;
 
@@ -193,6 +193,14 @@ public class DigiplexState : IDigiplexState, IDisposable
   public void RequestPartitionCommand(PartitionCommand command)
   {
     _partitionCommandSubject.OnNext(command);
+  }
+
+  /// <summary>
+  /// Request a multi-partition command (for macro groups)
+  /// </summary>
+  public void RequestMultiPartitionCommand(MultiPartitionCommand command)
+  {
+    _multiPartitionCommandSubject.OnNext(command);
   }
 
   /// <summary>
@@ -248,6 +256,7 @@ public class DigiplexState : IDigiplexState, IDisposable
     _zoneChangedSubject.Dispose();
     _partitionChangedSubject.Dispose();
     _partitionCommandSubject.Dispose();
+    _multiPartitionCommandSubject.Dispose();
     _systemStatusSubject.Dispose();
   }
 }

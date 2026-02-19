@@ -29,6 +29,7 @@ public class MqttService : IMqttService
 {
   private readonly ILogger<MqttService> _logger;
   private readonly MqttOptions _options;
+  private readonly PartitionConfig _partitionConfig;
   private readonly DigiplexState _state;
 
   private IMqttClient? _client;
@@ -47,10 +48,12 @@ public class MqttService : IMqttService
   public MqttService(
       ILogger<MqttService> logger,
       IOptions<MqttOptions> options,
+      IOptions<PartitionConfig> partitionConfig,
       DigiplexState state)
   {
     _logger = logger;
     _options = options.Value;
+    _partitionConfig = partitionConfig.Value;
     _state = state;
   }
 
@@ -199,6 +202,35 @@ public class MqttService : IMqttService
       }
     }
 
+    // Handle group commands: {prefix}/group/{groupId}/set
+    var groupPrefix = $"{_options.TopicPrefix}/group/";
+    if (topic.StartsWith(groupPrefix) && topic.EndsWith("/set"))
+    {
+      var groupId = topic[groupPrefix.Length..^4];
+      var group = _partitionConfig.Groups.FirstOrDefault(g =>
+          string.Equals(g.Id, groupId, StringComparison.OrdinalIgnoreCase));
+
+      if (group != null)
+      {
+        var command = MapHaCommandToMonitoring(payload);
+        if (command.HasValue)
+        {
+          var commands = group.PartitionIds.ToDictionary(id => id, _ => command.Value);
+          _logger.LogInformation("Group {GroupId} command: {Payload} → partitions {Partitions}",
+              groupId, payload, string.Join(", ", group.PartitionIds));
+          _state.RequestMultiPartitionCommand(new MultiPartitionCommand(commands));
+        }
+        else
+        {
+          _logger.LogWarning("Unknown group command: {Payload}", payload);
+        }
+      }
+      else
+      {
+        _logger.LogWarning("Unknown group: {GroupId}", groupId);
+      }
+    }
+
     // Handle panel time request: {prefix}/panel/time/get
     if (topic == $"{_options.TopicPrefix}/panel/time/get")
     {
@@ -295,6 +327,15 @@ public class MqttService : IMqttService
       // Publish HA alarm state string
       var haState = MapToHaState(evt.NewStatus);
       await PublishAsync($"{topic}/state", haState, true);
+
+      // Update group states for any group containing this partition
+      foreach (var group in _partitionConfig.Groups)
+      {
+        if (group.PartitionIds.Contains(evt.PartitionId))
+        {
+          await PublishGroupStateAsync(group);
+        }
+      }
     }));
 
     // Subscribe to system status changes
@@ -329,6 +370,56 @@ public class MqttService : IMqttService
 
       await PublishAsync($"{_options.TopicPrefix}/panel/info", payload, true);
     }));
+  }
+
+  private async Task PublishGroupStateAsync(PartitionGroup group)
+  {
+    var members = group.PartitionIds
+        .Select(id => _state.Partitions.GetValueOrDefault(id))
+        .Where(p => p != null)
+        .ToList();
+
+    if (members.Count == 0) return;
+
+    var groupState = AggregateGroupState(members!);
+    var topic = $"{_options.TopicPrefix}/group/{group.Id}";
+
+    var payload = JsonSerializer.Serialize(new
+    {
+      group_id = group.Id,
+      label = group.Label,
+      state = groupState,
+      partitions = members.Select(m => new
+      {
+        partition_id = m!.PartitionId,
+        state = MapToHaState(m)
+      })
+    }, JsonOptions);
+
+    await PublishAsync(topic, payload, true);
+    await PublishAsync($"{topic}/state", groupState, true);
+  }
+
+  private static string AggregateGroupState(List<PartitionStatus> members)
+  {
+    if (members.Any(m => m.InAlarm)) return "triggered";
+    if (members.Any(m => m.ExitDelay)) return "arming";
+    if (members.Any(m => m.EntryDelay)) return "pending";
+
+    if (members.All(m => m.ArmState == ArmState.Disarmed)) return "disarmed";
+
+    // Any armed partition means group is armed
+    if (members.All(m => m.ArmState != ArmState.Disarmed))
+    {
+      // All armed — use most common arm state mapping
+      if (members.All(m => m.ArmState == ArmState.StayArmed)) return "armed_home";
+      if (members.All(m => m.ArmState == ArmState.InstantArmed)) return "armed_night";
+      if (members.All(m => m.ArmState == ArmState.ForceArmed)) return "armed_custom_bypass";
+      return "armed_away";
+    }
+
+    // Mixed armed/disarmed — treat as armed for safety
+    return "armed_away";
   }
 
   private async Task PublishAsync(string topic, string payload, bool retain, CancellationToken cancellationToken = default)
@@ -400,6 +491,25 @@ public class MqttService : IMqttService
       };
 
       var topic = $"{_options.HomeAssistantDiscoveryPrefix}/alarm_control_panel/digiplex/partition_{partitionId}/config";
+      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+    }
+
+    // Publish discovery for each partition group (alarm_control_panel)
+    foreach (var group in _partitionConfig.Groups)
+    {
+      var config = new
+      {
+        name = group.Label,
+        unique_id = $"digiplex_group_{group.Id}",
+        state_topic = $"{_options.TopicPrefix}/group/{group.Id}/state",
+        command_topic = $"{_options.TopicPrefix}/group/{group.Id}/set",
+        json_attributes_topic = $"{_options.TopicPrefix}/group/{group.Id}",
+        availability_topic = $"{_options.TopicPrefix}/status",
+        supported_features = new[] { "arm_away", "arm_home", "arm_night", "arm_custom_bypass" },
+        device
+      };
+
+      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/alarm_control_panel/digiplex/group_{group.Id}/config";
       await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
     }
 

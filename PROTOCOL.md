@@ -389,17 +389,17 @@ Produces on the wire: `50 00 81 95 ... [checksum]`
 Response `Data[0..31]` layout (32 bytes):
 
 ```
-Data[0]:     Header byte (0x00)
-Data[1..5]:  Partition 1 status (5 bytes)
-Data[6..10]: Partition 2 status (5 bytes)
-Data[11..15]: Partition 3 status (5 bytes)
-Data[16..20]: Partition 4 status (5 bytes)
+Data[0..4]:   Partition 1 status (5 bytes)
+Data[5..9]:   Partition 2 status (5 bytes)
+Data[10..14]: Partition 3 status (5 bytes)
+Data[15..19]: Partition 4 status (5 bytes)
+Data[20]:     Trailing byte (0x04, purpose unknown)
 Data[21..31]: Analog/signal data (ignored)
 ```
 
 #### Partition status block (5 bytes per partition)
 
-Each partition uses a 5-byte block. The first byte at offset+0 is the primary status byte:
+Each partition uses a 5-byte block starting at `offset = partitionIndex * 5`.
 
 **Byte 0 — Arm/Alarm flags:**
 
@@ -414,37 +414,33 @@ Each partition uses a 5-byte block. The first byte at offset+0 is the primary st
 | 6   | audible_alarm    | Audible alarm active               |
 | 7   | pulse_fire_alarm | Pulse fire alarm active            |
 
-**Byte 1 — Delay/Memory flags:**
+**Byte 1 — Ready/Delay flags:**
 
 | Bit | Name             | Description                        |
 |-----|------------------|------------------------------------|
-| 0   | exit_delay       | Exit delay in progress             |
-| 1   | entry_delay      | Entry delay in progress            |
-| 2   | alarms_in_memory | Previous alarm stored              |
-| 3   | zone_bypassed    | One or more zones bypassed         |
+| 0   | ready            | Partition is ready to arm          |
+| 1   | exit_delay       | Exit delay in progress             |
+| 2   | entry_delay      | Entry delay in progress            |
+| 3   | (unknown)        | Always set on DGP-848, purpose TBD |
 
-**Byte 3 — Ready/Mode flags:**
+**Byte 2..4** — Additional flags (all zeros observed during idle/disarmed state).
 
-| Bit | Name              | Description                       |
-|-----|-------------------|-----------------------------------|
-| 0   | ready_status      | Partition is ready to arm          |
-| 1   | arm_force         | Force arm mode active              |
-| 2   | stay_mode_active  | Stay mode active                   |
-
-#### Winload capture example (idle, all disarmed)
+#### Winload capture example (idle, all disarmed + ready)
 
 ```
-RX: 50 00 81 95  00  09 00 00 00 00  09 00 00 00 00
-                 hdr  ──P1 (5 bytes)  ──P2 (5 bytes)
-    09 00 00 00 00  09 00 00 00 00  04 d2 01 b5 ...
-    ──P3 (5 bytes)  ──P4 (5 bytes)  ──analog data──
+RX: 50 00 81 95  00 09 00 00 00  00 09 00 00 00
+                 ──P1 (5 bytes)─  ──P2 (5 bytes)─
+    00 09 00 00 00  00 09 00 00 00  04 76 02 B5 ...
+    ──P3 (5 bytes)─  ──P4 (5 bytes)─  ──trailing──
 ```
 
-All 4 partitions show `0x09`:
-- Bit analysis: `0x09 = 0000_1001` — bit 0 (arm) set, bit 3 set
-- However, from the idle capture context, 0x09 appears to mean "ready, disarmed"
-- The exact bit mapping may differ from PAI's Spectra/Magellan definitions
-- **Debug logging** of raw bytes is included for validation on real panels
+Each partition block: `00 09 00 00 00`
+- Byte 0 = `0x00` → arm flags all clear → **Disarmed**
+- Byte 1 = `0x09 = 0b0000_1001` → bit 0 (ready) = 1, bit 3 (unknown) = 1 → **Ready**
+
+When zone 11 opens, partition 3 changes to: `00 08 00 00 00`
+- Byte 0 = `0x00` → still **Disarmed**
+- Byte 1 = `0x08 = 0b0000_1000` → bit 0 (ready) = 0 → **Not Ready**
 
 #### Arm state decoding logic
 
@@ -459,6 +455,10 @@ if (armed) {
 
 if (strobe_alarm || silent_alarm || audible_alarm) → InAlarm
 ```
+
+> **Note**: The exact arm flag bit positions in byte 0 are based on PAI's definitions
+> and have not yet been verified on a live armed DGP-848 panel. The ready flag in
+> byte 1 bit 0 is confirmed by live capture data.
 
 ### System Info — RAM 0x0144
 

@@ -76,6 +76,11 @@ public interface IDigiplexState
   IObservable<PartitionCommand> PartitionCommandRequested { get; }
 
   /// <summary>
+  /// Observable for multi-partition command requests (macro groups)
+  /// </summary>
+  IObservable<MultiPartitionCommand> MultiPartitionCommandRequested { get; }
+
+  /// <summary>
   /// Current system status (voltages, date/time, trouble flags)
   /// </summary>
   SystemStatus? SystemStatus { get; }

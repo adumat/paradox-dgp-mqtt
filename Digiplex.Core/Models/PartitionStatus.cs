@@ -32,6 +32,11 @@ public record PartitionStatus
 public record PartitionCommand(int PartitionId, byte Command);
 
 /// <summary>
+/// Command to send to multiple partitions atomically (for macro groups)
+/// </summary>
+public record MultiPartitionCommand(IReadOnlyDictionary<int, byte> Commands);
+
+/// <summary>
 /// Collection of all partition statuses
 /// </summary>
 public class PartitionStatusCollection

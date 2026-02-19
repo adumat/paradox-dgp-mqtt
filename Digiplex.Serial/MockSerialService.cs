@@ -10,12 +10,14 @@ public class MockSerialService : ISerialService
 {
   private readonly ILogger<MockSerialService> _logger;
   private readonly SerialOptions _options;
+  private readonly PartitionConfig _partitionConfig;
   private readonly DigiplexState _state;
   private readonly Random _random = new();
 
   private CancellationTokenSource? _cts;
   private Task? _pollingTask;
   private IDisposable? _commandSubscription;
+  private IDisposable? _multiCommandSubscription;
   private readonly byte[] _zoneData = new byte[12];
   private readonly byte[] _partitionData = new byte[32];
   private readonly byte[] _mockPartitionStates = new byte[4]; // arm state per partition
@@ -39,10 +41,12 @@ public class MockSerialService : ISerialService
   public MockSerialService(
       ILogger<MockSerialService> logger,
       IOptions<SerialOptions> options,
+      IOptions<PartitionConfig> partitionConfig,
       DigiplexState state)
   {
     _logger = logger;
     _options = options.Value;
+    _partitionConfig = partitionConfig.Value;
     _state = state;
   }
 
@@ -84,16 +88,16 @@ public class MockSerialService : ISerialService
 
     _state.UpdateZonesFromData(_zoneData);
 
-    // Set partition labels and initial state (all ready/disarmed = 0x09)
-    string[] partitionNames = ["Home", "Garage", "Office", "Shed"];
-    var partitionCount = Math.Clamp(_options.PartitionCount, 1, 4);
+    // Set partition labels and initial state (all ready/disarmed)
+    var partitionCount = Math.Clamp(_partitionConfig.Items.Length, 1, 4);
     for (var i = 0; i < partitionCount; i++)
     {
-      _state.SetLabel("partition", i + 1, partitionNames[i % partitionNames.Length]);
-      // 0x09 = ready(bit3 of byte3=0x01) + disarmed — match Winload idle capture
-      var offset = 1 + (i * 5);
+      var item = _partitionConfig.Items[i];
+      var label = !string.IsNullOrEmpty(item.Label) ? item.Label : $"Partition {item.Id}";
+      _state.SetLabel("partition", item.Id, label);
+      var offset = (item.Id - 1) * 5;
       _partitionData[offset] = 0x00;     // byte 0: not armed
-      _partitionData[offset + 3] = 0x01; // byte 3: ready
+      _partitionData[offset + 1] = 0x01; // byte 1: ready
     }
     _state.UpdatePartitionsFromData(_partitionData, partitionCount);
     _logger.LogInformation("Loaded {Count} mock partition labels", partitionCount);
@@ -102,6 +106,15 @@ public class MockSerialService : ISerialService
     _commandSubscription = _state.PartitionCommandRequested.Subscribe(cmd =>
     {
       HandleMockPartitionCommand(cmd);
+    });
+
+    // Subscribe to multi-partition commands (macro groups)
+    _multiCommandSubscription = _state.MultiPartitionCommandRequested.Subscribe(cmd =>
+    {
+      foreach (var (partitionId, command) in cmd.Commands)
+      {
+        HandleMockPartitionCommand(new PartitionCommand(partitionId, command));
+      }
     });
 
     _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -114,6 +127,8 @@ public class MockSerialService : ISerialService
 
     _commandSubscription?.Dispose();
     _commandSubscription = null;
+    _multiCommandSubscription?.Dispose();
+    _multiCommandSubscription = null;
 
     if (_cts != null)
     {
@@ -178,7 +193,7 @@ public class MockSerialService : ISerialService
         _state.UpdateZonesFromData(_zoneData);
 
         // Update partition status
-        _state.UpdatePartitionsFromData(_partitionData, Math.Clamp(_options.PartitionCount, 1, 4));
+        _state.UpdatePartitionsFromData(_partitionData, Math.Clamp(_partitionConfig.Items.Length, 1, 4));
 
         // Generate mock system status (current time, fixed voltages)
         var now = DateTime.Now;
@@ -217,36 +232,36 @@ public class MockSerialService : ISerialService
     if (cmd.PartitionId < 1 || cmd.PartitionId > 4) return;
 
     var idx = cmd.PartitionId - 1;
-    var offset = 1 + (idx * 5);
+    var offset = idx * 5;
 
     _logger.LogInformation("Mock: partition {Id} command {Cmd}", cmd.PartitionId, cmd.Command);
 
     switch (cmd.Command)
     {
       case MonitoringCommands.FullArm:
-        _partitionData[offset] = 0x01; // armed
-        _partitionData[offset + 3] = 0x00; // not ready (armed)
+        _partitionData[offset] = 0x01;     // byte 0: armed
+        _partitionData[offset + 1] = 0x00; // byte 1: not ready
         break;
       case MonitoringCommands.StayArm:
-        _partitionData[offset] = 0x05; // armed + stay
-        _partitionData[offset + 3] = 0x00;
+        _partitionData[offset] = 0x05;     // byte 0: armed + stay
+        _partitionData[offset + 1] = 0x00;
         break;
       case MonitoringCommands.InstantArm:
-        _partitionData[offset] = 0x03; // armed + sleep/instant
-        _partitionData[offset + 3] = 0x00;
+        _partitionData[offset] = 0x03;     // byte 0: armed + sleep/instant
+        _partitionData[offset + 1] = 0x00;
         break;
       case MonitoringCommands.ForceArm:
-        _partitionData[offset] = 0x01; // armed
-        _partitionData[offset + 3] = 0x00;
+        _partitionData[offset] = 0x01;     // byte 0: armed
+        _partitionData[offset + 1] = 0x00;
         break;
       case MonitoringCommands.Disarm:
-        _partitionData[offset] = 0x00; // disarmed
-        _partitionData[offset + 3] = 0x01; // ready
+        _partitionData[offset] = 0x00;     // byte 0: disarmed
+        _partitionData[offset + 1] = 0x01; // byte 1: ready
         break;
     }
 
     // Immediately update state so the next poll reflects the change
-    _state.UpdatePartitionsFromData(_partitionData, Math.Clamp(_options.PartitionCount, 1, 4));
+    _state.UpdatePartitionsFromData(_partitionData, Math.Clamp(_partitionConfig.Items.Length, 1, 4));
   }
 
   public async ValueTask DisposeAsync()

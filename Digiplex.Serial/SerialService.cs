@@ -17,7 +17,6 @@ public class SerialOptions
   public int ReadTimeoutMs { get; set; } = 1000;
   public int MaxRetries { get; set; } = 5;
   public int ZoneCount { get; set; } = 48;
-  public int PartitionCount { get; set; } = 4;
   public bool UseMock { get; set; }
   public double MockZoneToggleProbability { get; set; } = 0.05;
 }
@@ -29,6 +28,7 @@ public class SerialService : ISerialService
 {
   private readonly ILogger<SerialService> _logger;
   private readonly SerialOptions _options;
+  private readonly PartitionConfig _partitionConfig;
   private readonly IDigiplexCodec _codec;
   private readonly DigiplexState _state;
 
@@ -36,6 +36,7 @@ public class SerialService : ISerialService
   private CancellationTokenSource? _cts;
   private Task? _pollingTask;
   private IDisposable? _commandSubscription;
+  private IDisposable? _multiCommandSubscription;
   private readonly SemaphoreSlim _sendLock = new(1, 1);
 
   private static readonly byte[] InitString =
@@ -50,11 +51,13 @@ public class SerialService : ISerialService
   public SerialService(
       ILogger<SerialService> logger,
       IOptions<SerialOptions> options,
+      IOptions<PartitionConfig> partitionConfig,
       IDigiplexCodec codec,
       DigiplexState state)
   {
     _logger = logger;
     _options = options.Value;
+    _partitionConfig = partitionConfig.Value;
     _codec = codec;
     _state = state;
   }
@@ -100,6 +103,19 @@ public class SerialService : ISerialService
         }
       });
 
+      // Subscribe to multi-partition commands (macro groups)
+      _multiCommandSubscription = _state.MultiPartitionCommandRequested.Subscribe(async cmd =>
+      {
+        try
+        {
+          await SendMultiPartitionCommandAsync(cmd);
+        }
+        catch (Exception ex)
+        {
+          _logger.LogError(ex, "Error sending multi-partition command");
+        }
+      });
+
       // Start polling loop
       _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
       _pollingTask = Task.Run(() => PollingLoopAsync(_cts.Token), _cts.Token);
@@ -118,6 +134,8 @@ public class SerialService : ISerialService
 
     _commandSubscription?.Dispose();
     _commandSubscription = null;
+    _multiCommandSubscription?.Dispose();
+    _multiCommandSubscription = null;
 
     if (_cts != null)
     {
@@ -316,7 +334,7 @@ public class SerialService : ISerialService
         if (partitionResponse is ReadResponsePdu partitionData)
         {
           _logger.LogDebug("Partition raw: {Data}", BitConverter.ToString(partitionData.Data[..21]));
-          _state.UpdatePartitionsFromData(partitionData.Data, _options.PartitionCount);
+          _state.UpdatePartitionsFromData(partitionData.Data, _partitionConfig.Items.Length);
         }
 
         // Poll system info at RAM address 0x144
@@ -378,6 +396,36 @@ public class SerialService : ISerialService
     }
   }
 
+  private async Task SendMultiPartitionCommandAsync(MultiPartitionCommand command)
+  {
+    _logger.LogInformation("Sending multi-partition command to partitions {Partitions}",
+        string.Join(", ", command.Commands.Keys));
+
+    byte GetCommand(int partitionId) =>
+        command.Commands.TryGetValue(partitionId, out var cmd) ? cmd : MonitoringCommands.Nop;
+
+    var pdu = new MonitorRequestPdu
+    {
+      Partition1 = GetCommand(1),
+      Partition2 = GetCommand(2),
+      Partition3 = GetCommand(3),
+      Partition4 = GetCommand(4),
+    };
+
+    var response = await SendAndReceiveAsync(pdu);
+
+    if (response is MonitorResponsePdu monitorResponse)
+    {
+      _logger.LogDebug("Multi-partition command response: P1={P1} P2={P2} P3={P3} P4={P4}",
+          monitorResponse.Partition1, monitorResponse.Partition2,
+          monitorResponse.Partition3, monitorResponse.Partition4);
+    }
+    else if (response is ErrorResponsePdu errorResponse)
+    {
+      _logger.LogWarning("Multi-partition command error: {Error}", errorResponse.ErrorMessage);
+    }
+  }
+
   private async Task LoadLabelsAsync(CancellationToken cancellationToken)
   {
     _logger.LogInformation("Loading zone labels");
@@ -417,12 +465,13 @@ public class SerialService : ISerialService
 
     _logger.LogInformation("Loaded {Count} zone labels", zoneIndex - 1);
 
-    // Set default partition labels (EEPROM address unknown for DGP-848)
-    for (var i = 1; i <= _options.PartitionCount; i++)
+    // Set partition labels from config (DGP-848 stores labels on keypads, not panel EEPROM)
+    foreach (var item in _partitionConfig.Items)
     {
-      _state.SetLabel("partition", i, $"Partition {i}");
+      var label = !string.IsNullOrEmpty(item.Label) ? item.Label : $"Partition {item.Id}";
+      _state.SetLabel("partition", item.Id, label);
     }
-    _logger.LogInformation("Set {Count} default partition labels", _options.PartitionCount);
+    _logger.LogInformation("Set {Count} partition labels from config", _partitionConfig.Items.Length);
   }
 
   public async ValueTask DisposeAsync()
