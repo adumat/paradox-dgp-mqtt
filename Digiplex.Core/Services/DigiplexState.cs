@@ -78,7 +78,7 @@ public class DigiplexState : IDigiplexState, IDisposable
     };
 
     var oldStatus = _zones.GetValueOrDefault(zoneId);
-    if (oldStatus?.State != newStatus.State)
+    if (oldStatus != newStatus)
     {
       _zones[zoneId] = newStatus;
       _zoneChangedSubject.OnNext(new ZoneChangedEvent(
