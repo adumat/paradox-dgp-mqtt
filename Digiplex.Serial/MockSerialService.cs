@@ -247,11 +247,11 @@ public class MockSerialService : ISerialService
         _partitionData[offset + 1] = 0x00;
         break;
       case MonitoringCommands.InstantArm:
-        _partitionData[offset] = 0x03;     // byte 0: armed + sleep/instant
+        _partitionData[offset] = 0x09;     // byte 0: armed + no_entry (bit0+bit3)
         _partitionData[offset + 1] = 0x00;
         break;
       case MonitoringCommands.ForceArm:
-        _partitionData[offset] = 0x01;     // byte 0: armed
+        _partitionData[offset] = 0x03;     // byte 0: armed + force (bit0+bit1)
         _partitionData[offset + 1] = 0x00;
         break;
       case MonitoringCommands.Disarm:

@@ -139,10 +139,11 @@ public class DigiplexState : IDigiplexState, IDisposable
       var statusByte = data[offset + 1];   // byte 1: ready, delays
       var flagsByte = data[offset + 2];    // byte 2: additional flags
 
-      // Byte 0 bits: arm(0), arm_sleep(1), arm_stay(2), [3], strobe_alarm(4), silent_alarm(5), audible_alarm(6), pulse_fire_alarm(7)
+      // Byte 0 bits: armed(0), force_arm(1), stay_arm(2), no_entry(3), strobe_alarm(4), silent_alarm(5), audible_alarm(6)
       var armed = (armByte & 0x01) != 0;
-      var armSleep = (armByte & 0x02) != 0;
+      var forceArm = (armByte & 0x02) != 0;
       var armStay = (armByte & 0x04) != 0;
+      var noEntry = (armByte & 0x08) != 0;
       var strobeAlarm = (armByte & 0x10) != 0;
       var silentAlarm = (armByte & 0x20) != 0;
       var audibleAlarm = (armByte & 0x40) != 0;
@@ -157,8 +158,9 @@ public class DigiplexState : IDigiplexState, IDisposable
       var armState = ArmState.Disarmed;
       if (armed)
       {
-        if (armStay) armState = ArmState.StayArmed;
-        else if (armSleep) armState = ArmState.InstantArmed;
+        if (noEntry) armState = ArmState.InstantArmed;
+        else if (armStay) armState = ArmState.StayArmed;
+        else if (forceArm) armState = ArmState.ForceArmed;
         else armState = ArmState.Armed;
       }
 

@@ -401,18 +401,18 @@ Data[21..31]: Analog/signal data (ignored)
 
 Each partition uses a 5-byte block starting at `offset = partitionIndex * 5`.
 
-**Byte 0 — Arm/Alarm flags:**
+**Byte 0 — Arm/Alarm flags** (verified from serial captures on DGP-848):
 
-| Bit | Name             | Description                        |
-|-----|------------------|------------------------------------|
-| 0   | arm              | Partition is armed                 |
-| 1   | arm_sleep        | Armed in sleep/instant mode        |
-| 2   | arm_stay         | Armed in stay/home mode            |
-| 3   | (reserved)       |                                    |
-| 4   | strobe_alarm     | Strobe alarm active                |
-| 5   | silent_alarm     | Silent alarm active                |
-| 6   | audible_alarm    | Audible alarm active               |
-| 7   | pulse_fire_alarm | Pulse fire alarm active            |
+| Bit | Name             | Description                                                |
+|-----|------------------|------------------------------------------------------------|
+| 0   | armed            | Partition is armed (set after exit delay completes)        |
+| 1   | force_arm        | Force arm mode (set immediately on ForceArm command)       |
+| 2   | arm_stay         | Stay arm mode (set immediately on StayArm command)         |
+| 3   | no_entry         | Instant/no-entry mode (set immediately on InstantArm cmd)  |
+| 4   | strobe_alarm     | Strobe alarm active                                        |
+| 5   | silent_alarm     | Silent alarm active                                        |
+| 6   | audible_alarm    | Audible alarm active                                       |
+| 7   | (unknown)        |                                                            |
 
 **Byte 1 — Ready/Delay flags:**
 
@@ -442,12 +442,25 @@ When zone 11 opens, partition 3 changes to: `00 08 00 00 00`
 - Byte 0 = `0x00` → still **Disarmed**
 - Byte 1 = `0x08 = 0b0000_1000` → bit 0 (ready) = 0 → **Not Ready**
 
+**Observed arm byte values** (from serial captures):
+
+| Arm Type    | During Exit Delay | Fully Armed |
+|-------------|-------------------|-------------|
+| Full Arm    | `0x00`            | `0x01`      |
+| Force Arm   | `0x02`            | `0x03`      |
+| Stay Arm    | `0x04`            | `0x05`      |
+| Instant Arm | `0x08`            | `0x09`      |
+
+Note: during exit delay, the arm type bits (1-3) are set but bit 0 (armed) is NOT set.
+After exit delay completes, bit 0 is added.
+
 #### Arm state decoding logic
 
 ```
 if (armed) {
+    if (no_entry)  → InstantArmed (armed_night)
     if (arm_stay)  → StayArmed (armed_home)
-    if (arm_sleep) → InstantArmed (armed_night)
+    if (force_arm) → ForceArmed (armed_custom_bypass)
     else           → Armed (armed_away)
 } else {
     → Disarmed
@@ -455,10 +468,6 @@ if (armed) {
 
 if (strobe_alarm || silent_alarm || audible_alarm) → InAlarm
 ```
-
-> **Note**: The exact arm flag bit positions in byte 0 are based on PAI's definitions
-> and have not yet been verified on a live armed DGP-848 panel. The ready flag in
-> byte 1 bit 0 is confirmed by live capture data.
 
 ### System Info — RAM 0x0144
 
@@ -574,12 +583,15 @@ RX: 50 00 81 64 ...35    ─── Response (empty)
 | `digiplex/panel/dc_current`     | Raw byte value                             | Yes    |
 | `digiplex/panel/trouble`        | Trouble flags byte                         | Yes    |
 | `digiplex/panel/time`           | ISO 8601 datetime                          | Yes    |
+| `digiplex/group/{id}`            | JSON: group_id, label, state, partitions   | Yes    |
+| `digiplex/group/{id}/state`     | HA state string (aggregated from members)  | Yes    |
 
 ### Command Topics
 
 | Topic                             | Payload                                         |
 |-----------------------------------|-------------------------------------------------|
 | `digiplex/partition/{id}/set`     | `ARM_AWAY`, `ARM_HOME`, `ARM_NIGHT`, `ARM_CUSTOM_BYPASS`, `DISARM` |
+| `digiplex/group/{id}/set`        | Same commands — applied to all partitions in the group atomically |
 
 ### HA Alarm State Mapping
 
@@ -600,6 +612,7 @@ RX: 50 00 81 64 ...35    ─── Response (empty)
 |------------------------|---------------------------|--------------------------------------------------------------|
 | `binary_sensor`        | Zone 1..48                | `homeassistant/binary_sensor/digiplex/zone_{id}/config`      |
 | `alarm_control_panel`  | Partition 1..4            | `homeassistant/alarm_control_panel/digiplex/partition_{id}/config` |
+| `alarm_control_panel`  | Partition groups          | `homeassistant/alarm_control_panel/digiplex/group_{id}/config`    |
 | `sensor`               | Panel Voltage (VDC)       | `homeassistant/sensor/digiplex/panel_vdc/config`             |
 | `sensor`               | Battery Voltage           | `homeassistant/sensor/digiplex/panel_battery/config`         |
 | `sensor`               | DC Current                | `homeassistant/sensor/digiplex/panel_dc_current/config`      |
