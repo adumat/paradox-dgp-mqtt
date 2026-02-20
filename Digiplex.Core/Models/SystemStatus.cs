@@ -26,7 +26,7 @@ public record SystemStatus
     // [9]: hour
     // [10]: minute
     // [11]: second
-    // [12]: VDC raw → 20.3 * raw / 255
+    // [12]: VDC raw → 22.4 * raw / 255 (verified against Winload display on DGP-848)
     // [13]: Battery raw → 22.8 * raw / 255
     // [14]: DC current raw
 
@@ -48,7 +48,7 @@ public record SystemStatus
       panelTime = DateTime.MinValue;
     }
 
-    var vdc = Math.Round(20.3 * data[12] / 255.0, 1);
+    var vdc = Math.Round(22.4 * data[12] / 255.0, 1);
     var battery = Math.Round(22.8 * data[13] / 255.0, 1);
 
     return new SystemStatus

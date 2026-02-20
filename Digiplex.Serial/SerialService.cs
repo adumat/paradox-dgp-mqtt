@@ -241,6 +241,15 @@ public class SerialService : ISerialService
   {
     _state.SetConnectionState(ConnectionState.Initializing);
 
+    // Send wake-up string (37 × 0xFF) — Winload sends this before the init handshake
+    _logger.LogDebug("Sending wake-up string");
+    var wakeUp = new byte[ProtocolConstants.PacketSize];
+    Array.Fill(wakeUp, (byte)0xFF);
+    _serialPort!.Write(wakeUp, 0, wakeUp.Length);
+
+    // Read wake-up response (panel echoes 0xFF in byte 0, rest zeros)
+    await ReceiveAsync(cancellationToken);
+
     // Send init string
     _logger.LogDebug("Sending init string");
     _serialPort!.Write(InitString, 0, InitString.Length);

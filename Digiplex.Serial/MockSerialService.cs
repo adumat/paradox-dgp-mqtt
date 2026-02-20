@@ -255,8 +255,9 @@ public class MockSerialService : ISerialService
         _partitionData[offset + 1] = 0x00;
         break;
       case MonitoringCommands.Disarm:
+        var wasInAlarm = (_partitionData[offset] & 0x70) != 0; // any alarm bit set?
         _partitionData[offset] = 0x00;     // byte 0: disarmed
-        _partitionData[offset + 1] = 0x01; // byte 1: ready
+        _partitionData[offset + 1] = (byte)(wasInAlarm ? 0x11 : 0x01); // byte 1: ready + alarm_in_memory if was alarming
         break;
     }
 

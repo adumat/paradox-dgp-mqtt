@@ -148,10 +148,11 @@ public class DigiplexState : IDigiplexState, IDisposable
       var silentAlarm = (armByte & 0x20) != 0;
       var audibleAlarm = (armByte & 0x40) != 0;
 
-      // Byte 1 bits: ready(0), exit_delay(1), entry_delay(2)
+      // Byte 1 bits: ready(0), exit_delay(1), entry_delay(2), partition_enabled(3), alarm_in_memory(4)
       var ready = (statusByte & 0x01) != 0;
       var exitDelay = (statusByte & 0x02) != 0;
       var entryDelay = (statusByte & 0x04) != 0;
+      var alarmInMemory = (statusByte & 0x10) != 0;
 
       var inAlarm = strobeAlarm || silentAlarm || audibleAlarm;
 
@@ -175,7 +176,8 @@ public class DigiplexState : IDigiplexState, IDisposable
         InAlarm = inAlarm,
         Ready = ready,
         ExitDelay = exitDelay,
-        EntryDelay = entryDelay
+        EntryDelay = entryDelay,
+        AlarmInMemory = alarmInMemory
       });
     }
   }

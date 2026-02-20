@@ -24,6 +24,7 @@ public record PartitionStatus
   public bool Ready { get; init; }
   public bool ExitDelay { get; init; }
   public bool EntryDelay { get; init; }
+  public bool AlarmInMemory { get; init; }
 }
 
 /// <summary>

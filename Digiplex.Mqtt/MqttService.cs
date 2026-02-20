@@ -319,7 +319,8 @@ public class MqttService : IMqttService
         in_alarm = evt.NewStatus.InAlarm,
         ready = evt.NewStatus.Ready,
         exit_delay = evt.NewStatus.ExitDelay,
-        entry_delay = evt.NewStatus.EntryDelay
+        entry_delay = evt.NewStatus.EntryDelay,
+        alarm_in_memory = evt.NewStatus.AlarmInMemory
       }, JsonOptions);
 
       await PublishAsync(topic, payload, true);

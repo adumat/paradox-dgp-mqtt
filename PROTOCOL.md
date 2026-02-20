@@ -57,9 +57,27 @@ The command type is encoded in the **upper 4 bits** of byte 0:
 
 ## Connection Sequence
 
-### 1. Init Handshake
+### 1. Wake-Up
 
-The connection begins with a fixed 37-byte init string:
+The connection begins with a 37-byte wake-up string (all `0xFF`):
+
+```
+TX: FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+    FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+    FF FF FF FF FF
+```
+
+The panel responds with `0xFF` in byte 0, rest zeros:
+
+```
+RX: FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    00 00 00 00 FF
+```
+
+### 2. Init Handshake
+
+After wake-up, the init handshake string is sent:
 
 ```
 TX: 5F 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00
@@ -82,7 +100,7 @@ RX: 00 [addr] [eeprom_hi] [eeprom_lo] [product_id] [sw_ver] [sw_rev] [sw_id]
     ... padding ... [checksum]
 ```
 
-### 2. Login
+### 3. Login
 
 Login is performed by sending an **Init PDU** back with the user password set:
 
@@ -104,7 +122,7 @@ RX: 1_ [answer<<4 | ...] [callback_hi] [callback_lo] ... [checksum]
 - Byte 0 low nibble: message center
 - Byte 1 high nibble: answer code (0 = success)
 
-### 3. Load Labels
+### 4. Load Labels
 
 After login, zone labels are read from EEPROM. Each label is 16 bytes of ASCII text.
 
@@ -119,7 +137,7 @@ RX: ReadResponsePdu { Data = "Front Door\0\0\0\0\0\0" }
       00 00 00 00 ... [checksum]
 ```
 
-### 4. Polling Loop
+### 5. Polling Loop
 
 After initialization, the panel is polled cyclically. Winload polls 4 RAM addresses every ~1 second:
 
@@ -137,6 +155,10 @@ Our implementation polls 3 addresses:
 | RAM 0x153 | `81 53`   | Zone status (12 bytes: 6 zone + 6 tamper) |
 | RAM 0x195 | `81 95`   | Partition status     |
 | RAM 0x144 | `81 44`   | System info          |
+
+### 6. Disconnection
+
+There is no protocol-level disconnect/close packet. Winload simply drops the serial connection. Serial captures confirm the last exchange is always a normal polling read with no termination handshake.
 
 ---
 
@@ -418,10 +440,11 @@ Each partition uses a 5-byte block starting at `offset = partitionIndex * 5`.
 
 | Bit | Name             | Description                        |
 |-----|------------------|------------------------------------|
-| 0   | ready            | Partition is ready to arm          |
-| 1   | exit_delay       | Exit delay in progress             |
-| 2   | entry_delay      | Entry delay in progress            |
-| 3   | (unknown)        | Always set on DGP-848, purpose TBD |
+| 0   | ready            | Partition is ready to arm                        |
+| 1   | exit_delay       | Exit delay in progress                           |
+| 2   | entry_delay      | Entry delay in progress                          |
+| 3   | (unknown)        | Always set on DGP-848, purpose TBD               |
+| 4   | alarm_in_memory  | Alarm was triggered, persists until acknowledged |
 
 **Byte 2..4** — Additional flags (all zeros observed during idle/disarmed state).
 
@@ -453,6 +476,12 @@ When zone 11 opens, partition 3 changes to: `00 08 00 00 00`
 
 Note: during exit delay, the arm type bits (1-3) are set but bit 0 (armed) is NOT set.
 After exit delay completes, bit 0 is added.
+
+**Observed alarm byte value** (instant arm + audible alarm):
+
+`0x59 = 0101_1001` → armed(0x01) + no_entry(0x08) + strobe_alarm(0x10) + audible_alarm(0x40)
+
+After disarm, byte 1 changes from `0x09` to `0x19` (bit 4 = alarm_in_memory set).
 
 #### Arm state decoding logic
 
@@ -496,12 +525,14 @@ Data[15..31]: Zeros
 
 #### Voltage conversion formulas
 
-From the PAI project (Spectra/Magellan, verified against Winload capture):
+Verified against Winload display on DGP-848 (raw byte 0xC5=197 → Winload shows 17.3V):
 
 ```
-Panel voltage (VDC)     = 20.3 × raw / 255
+Panel voltage (VDC)     = 22.4 × raw / 255
 Battery voltage         = 22.8 × raw / 255
 ```
+
+Note: PAI (Spectra/Magellan) uses `20.3` for VDC, but this gives ~15.7V for the same raw byte. The DGP-848 uses a different voltage divider ratio.
 
 #### Winload capture example
 
@@ -515,7 +546,7 @@ RX: 50 00 81 44  08 00 00 00 01  14 19 0B 13 15 10 05
     │  │  │
     │  │  └── DC current raw = 0x97 (151)
     │  └───── Battery raw = 0x94 (148) → 22.8 × 148/255 = 13.2V
-    └──────── VDC raw = 0xC5 (197) → 20.3 × 197/255 = 15.7V
+    └──────── VDC raw = 0xC5 (197) → 22.4 × 197/255 = 17.3V
 
 Date: century=0x14(20), year=0x19(25), month=0x0B(11), day=0x13(19)
 Time: hour=0x15(21), minute=0x10(16), second=0x05(5)

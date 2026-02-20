@@ -138,6 +138,91 @@ After disarming, the Winload trouble display was opened, which triggered reads o
 
 ---
 
+## Capture 4: Keypad Beep + Multi-Partition Arm
+
+**Folder:** [`04-keypadbeep-misc/`](04-keypadbeep-misc/)
+**Serial time:** 16:02:57 – 16:04:25
+
+**Scenario:** Winload init/login → beep P1 keypad → full arm P1 → full arm P2 → disarm P2 during exit delay → disarm P1 during exit delay
+
+### Init/Login Sequence
+
+1. TX: 37 × `0xFF` (wake-up) → RX: `FF 00...00 FF` (panel acknowledges)
+2. TX: `5F 20 00...00 7F` (init handshake) → RX: `00 00 08 10 00 04...37` (panel identification)
+3. TX: echo panel ID with byte 12 changed `06→0A` (password) → RX: `10 00...00 10` (login success)
+
+### Commands Sent
+
+| Time | Command PDU | Decoded |
+|------|-------------|---------|
+| 16:03:13 | `40 00 80 00 ...` | P1=Beep (0x8) |
+| 16:03:40 | `40 00 20 00 ...` | P1=FullArm (0x2) |
+| 16:03:47 | `40 00 02 00 ...` | P2=FullArm (0x2) |
+| 16:03:56 | `40 00 06 00 ...` | P2=Disarm (0x6) |
+| 16:04:19 | `40 00 60 00 ...` | P1=Disarm (0x6) |
+
+### Partition Status (RAM 0x0195)
+
+| Time | P1 byte0,byte1 | P2 byte0,byte1 | State |
+|------|----------------|----------------|-------|
+| 16:03:00 – 16:03:39 | `0x00, 0x09` | `0x00, 0x09` | Both disarmed, ready |
+| 16:03:41 – 16:03:46 | `0x00, 0x0B` | `0x00, 0x09` | P1 exit delay, P2 disarmed |
+| 16:03:47 – 16:03:55 | `0x00, 0x0B` | `0x00, 0x0B` | Both in exit delay |
+| 16:03:57 – 16:04:18 | `0x00, 0x0B` | `0x00, 0x09` | P1 exit delay, P2 disarmed |
+| 16:04:19+ | `0x00, 0x09` | `0x00, 0x09` | Both disarmed, ready |
+
+Both partitions were disarmed during exit delay — neither reached the armed state (byte0 stayed `0x00`). This confirms full arm during exit delay has no arm type bits in byte 0.
+
+### Key Frames
+
+| Frame | Description |
+|-------|-------------|
+| ![P1 exit delay](04-keypadbeep-misc/p1_exit_delay.jpg) | P1 "EXITING" after full arm command |
+| ![Both exiting](04-keypadbeep-misc/p1p2_exit_delay.jpg) | P1 + P2 both "EXITING" simultaneously |
+| ![P2 disarmed](04-keypadbeep-misc/p2_disarmed.jpg) | P2 disarmed while P1 still in exit delay |
+| ![Both disarmed](04-keypadbeep-misc/p1_disarmed.jpg) | Both back to "Ready" after disarming P1 |
+
+---
+
+## Capture 5: Instant Arm + Audible Alarm
+
+**Folder:** [`05-instant-siren/`](05-instant-siren/)
+**Serial time:** 16:05:57 – 16:07:43
+
+**Scenario:** Winload init/login → instant arm P1 → wait 60s exit delay → door opens → audible alarm (instant = no entry delay, straight to alarm) → disarm
+
+### Commands Sent
+
+| Time | Command PDU | Decoded |
+|------|-------------|---------|
+| 16:06:08 | `40 00 40 00 ...` | P1=InstantArm (0x4) |
+| 16:07:23 | `40 00 60 00 ...` | P1=Disarm (0x6) |
+
+### Partition 1 Status (RAM 0x0195)
+
+| Time | byte0 | byte1 | byte2 | State |
+|------|-------|-------|-------|-------|
+| 16:06:00 – 16:06:08 | `0x00` | `0x09` | `0x00` | Disarmed, ready |
+| 16:06:09 – 16:07:07 | `0x08` (bit3=no_entry) | `0x0B` (ready+exit_delay) | `0x04` | Exit delay (instant) |
+| 16:07:08 – 16:07:16 | `0x09` (bit0+bit3) | `0x09` (ready) | `0x00` | **Instant armed** |
+| 16:07:17 – 16:07:23 | **`0x59`** (armed+no_entry+strobe+audible) | `0x19` (ready+alarm_in_memory) | `0x00` | **Audible alarm** |
+| 16:07:24+ | `0x00` | **`0x19`** (ready+alarm_in_memory) | `0x00` | Disarmed, alarm in memory |
+
+**Alarm byte breakdown:** `0x59 = 0101_1001` → bit0 (armed) + bit3 (no_entry) + bit4 (strobe_alarm) + bit6 (audible_alarm)
+
+Zone 14 opened at 16:07:12 while instant armed → alarm triggered immediately (no entry delay with instant arm). Zone flags at RAM 0x0164 byte offset 29 changed from `0x00` to `0xC0` during alarm.
+
+### Key Frames
+
+| Frame | Description |
+|-------|-------------|
+| ![Exit delay](05-instant-siren/instant_arm_exit_delay.jpg) | P1 "EXITING" during instant arm exit delay |
+| ![Armed](05-instant-siren/instant_arm_armed.jpg) | P1 "INSTANT ARMED" — exit delay finished |
+| ![Alarm](05-instant-siren/alarm_triggered.jpg) | P1 "AUDIBLE ALARM" — zone opened, siren active |
+| ![Disarmed](05-instant-siren/alarm_disarmed.jpg) | P1 disarmed after alarm — "AUDIBLE ALARM" still displayed |
+
+---
+
 ## Partition Status Byte Map (from captures)
 
 ### Byte 0 — Arm/Alarm Flags
@@ -163,10 +248,11 @@ bit 7 (0x80) = unknown
 ### Byte 1 — Status Flags
 
 ```
-bit 0 (0x01) = READY        — all zones in partition are closed
-bit 1 (0x02) = EXIT_DELAY   — exit delay countdown active
-bit 2 (0x04) = ENTRY_DELAY  — entry delay countdown active
-bit 3 (0x08) = always set   — likely "partition enabled/supervised"
+bit 0 (0x01) = READY            — all zones in partition are closed
+bit 1 (0x02) = EXIT_DELAY       — exit delay countdown active
+bit 2 (0x04) = ENTRY_DELAY      — entry delay countdown active
+bit 3 (0x08) = always set       — likely "partition enabled/supervised"
+bit 4 (0x10) = ALARM_IN_MEMORY  — alarm was triggered, persists until acknowledged
 ```
 
 ### Byte 2 — Extra
@@ -207,7 +293,11 @@ Panel echoes the exact same PDU as acknowledgment.
 ## Additional Observations
 
 - **Winload pre-clear:** Before InstantArm, Winload sends a Disarm first (safety). Not observed before Stay/Force/Full arm.
-- **Exit delay duration:** 60 seconds for all arm types.
+- **Exit delay duration:** 60 seconds for all arm types, including instant arm.
 - **Command latency:** State change reflected in next poll cycle (< 1 second).
 - **P3 ready flicker:** Partition 3 (radar ground floor) loses ready bit intermittently — user was physically triggering the radar sensor during recording.
 - **PC Time vs Panel Time:** Panel clock runs ~6 minutes behind PC clock. Serial monitor uses PC timestamps.
+- **Init sequence:** Winload sends 37 × `0xFF` (wake-up) before the `0x5F 0x20` init handshake. Panel responds to wake-up with `FF 00...00 FF`.
+- **No close packet:** Winload does not send a protocol-level disconnect. It simply drops the serial connection.
+- **Alarm in memory:** After an alarm is disarmed, byte1 bit4 (0x10) persists until the alarm is acknowledged, causing byte1 = `0x19` instead of the usual `0x09`.
+- **Instant arm = no entry delay:** When a zone opens while instant armed, the alarm triggers immediately — there is no entry delay countdown.
