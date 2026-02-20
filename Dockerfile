@@ -41,7 +41,7 @@ ENV Mqtt__BrokerPort=1883
 ENV Mqtt__TopicPrefix=digiplex
 ENV Mqtt__EnableHomeAssistantDiscovery=true
 
-LABEL org.opencontainers.image.source=https://github.com/adumat/digiplex2mqtt
+LABEL org.opencontainers.image.source=https://github.com/adumat/paradox-dgp-mqtt
 LABEL org.opencontainers.image.description="Digiplex alarm panel to MQTT bridge"
 
 # === Release runtime (default target) ===

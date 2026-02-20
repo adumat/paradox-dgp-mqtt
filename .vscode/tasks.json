@@ -21,7 +21,7 @@
       "command": "ssh",
       "args": [
         "${input:remoteUser}@${input:remoteHost}",
-        "mkdir -p ~/digiplex2mqtt/mosquitto"
+        "mkdir -p ~/paradox-dgp-mqtt/mosquitto"
       ],
       "problemMatcher": [],
       "detail": "Create remote directory structure"
@@ -35,7 +35,7 @@
         "docker-compose.yml",
         "mosquitto/",
         ".env",
-        "${input:remoteUser}@${input:remoteHost}:~/digiplex2mqtt/"
+        "${input:remoteUser}@${input:remoteHost}:~/paradox-dgp-mqtt/"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
@@ -50,7 +50,7 @@
       "command": "ssh",
       "args": [
         "${input:remoteUser}@${input:remoteHost}",
-        "cd ~/digiplex2mqtt && docker compose pull && docker compose up -d"
+        "cd ~/paradox-dgp-mqtt && docker compose pull && docker compose up -d"
       ],
       "dependsOn": "sync-remote",
       "problemMatcher": [],
@@ -63,7 +63,7 @@
       "command": "ssh",
       "args": [
         "${input:remoteUser}@${input:remoteHost}",
-        "cd ~/digiplex2mqtt && docker compose down"
+        "cd ~/paradox-dgp-mqtt && docker compose down"
       ],
       "dependsOn": "sync-remote",
       "problemMatcher": [],

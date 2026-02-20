@@ -247,8 +247,16 @@ public class SerialService : ISerialService
     Array.Fill(wakeUp, (byte)0xFF);
     _serialPort!.Write(wakeUp, 0, wakeUp.Length);
 
-    // Read wake-up response (panel echoes 0xFF in byte 0, rest zeros)
-    await ReceiveAsync(cancellationToken);
+    // Read wake-up response (not a real PDU — just discard it)
+    var wakeUpResponse = new byte[ProtocolConstants.PacketSize];
+    var wakeUpRead = 0;
+    while (wakeUpRead < ProtocolConstants.PacketSize)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      try { wakeUpRead += _serialPort!.Read(wakeUpResponse, wakeUpRead, ProtocolConstants.PacketSize - wakeUpRead); }
+      catch (TimeoutException) { break; }
+    }
+    _logger.LogDebug("Wake-up RX: {Data}", BitConverter.ToString(wakeUpResponse, 0, wakeUpRead));
 
     // Send init string
     _logger.LogDebug("Sending init string");

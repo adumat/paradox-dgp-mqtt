@@ -1,6 +1,6 @@
 services:
   digiplex:
-    image: ghcr.io/adumat/digiplex2mqtt:${IMAGE_TAG:-latest}
+    image: ghcr.io/adumat/paradox-dgp-mqtt:${IMAGE_TAG:-latest}
     container_name: digiplex
     restart: unless-stopped
     devices:
