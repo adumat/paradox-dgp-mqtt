@@ -8,7 +8,7 @@ public record SystemStatus
   public DateTime PanelTime { get; init; }
   public double Vdc { get; init; }
   public double BatteryVoltage { get; init; }
-  public byte DcCurrent { get; init; }
+  public double DcVoltage { get; init; }
   public byte TroubleFlags { get; init; }
 
   /// <summary>
@@ -28,7 +28,7 @@ public record SystemStatus
     // [11]: second
     // [12]: VDC raw → 22.4 * raw / 255 (verified against Winload display on DGP-848)
     // [13]: Battery raw → 22.8 * raw / 255
-    // [14]: DC current raw
+    // [14]: DC output raw → 22.4 * raw / 255 (verified against Winload display on DGP-848)
 
     var century = data[5];
     var year = data[6];
@@ -50,13 +50,14 @@ public record SystemStatus
 
     var vdc = Math.Round(22.4 * data[12] / 255.0, 1);
     var battery = Math.Round(22.8 * data[13] / 255.0, 1);
+    var dcVoltage = Math.Round(22.4 * data[14] / 255.0, 1);
 
     return new SystemStatus
     {
       PanelTime = panelTime,
       Vdc = vdc,
       BatteryVoltage = battery,
-      DcCurrent = data[14],
+      DcVoltage = dcVoltage,
       TroubleFlags = data[0]
     };
   }

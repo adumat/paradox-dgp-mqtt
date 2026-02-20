@@ -42,7 +42,7 @@ public class DigiplexState : IDigiplexState, IDisposable
 
   public SystemStatus? SystemStatus => _systemStatus;
   public IObservable<SystemStatus> SystemStatusChanged => _systemStatusSubject
-      .DistinctUntilChanged(s => (s.Vdc, s.BatteryVoltage, s.DcCurrent, s.TroubleFlags));
+      .DistinctUntilChanged(s => (s.Vdc, s.BatteryVoltage, s.DcVoltage, s.TroubleFlags));
 
   public IReadOnlyDictionary<string, Dictionary<int, string>> Labels => _labels;
 

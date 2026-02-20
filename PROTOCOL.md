@@ -519,7 +519,7 @@ Data[10]:    Minute  (0x10 = 16)
 Data[11]:    Second  (0x05 = 5)
 Data[12]:    VDC raw
 Data[13]:    Battery raw
-Data[14]:    DC current raw
+Data[14]:    DC output voltage raw
 Data[15..31]: Zeros
 ```
 
@@ -530,9 +530,10 @@ Verified against Winload display on DGP-848 (raw byte 0xC5=197 → Winload shows
 ```
 Panel voltage (VDC)     = 22.4 × raw / 255
 Battery voltage         = 22.8 × raw / 255
+DC output voltage       = 22.4 × raw / 255
 ```
 
-Note: PAI (Spectra/Magellan) uses `20.3` for VDC, but this gives ~15.7V for the same raw byte. The DGP-848 uses a different voltage divider ratio.
+Note: PAI (Spectra/Magellan) uses `20.3` for VDC, but this gives ~15.7V for the same raw byte. The DGP-848 uses a different voltage divider ratio. PAI labels byte 14 as "DC current" but Winload displays it as a voltage (~13.3V), and the same formula as VDC matches.
 
 #### Winload capture example
 
@@ -544,7 +545,7 @@ RX: 50 00 81 44  08 00 00 00 01  14 19 0B 13 15 10 05
 
     C5 94 97  00 00 ... 00  [83]
     │  │  │
-    │  │  └── DC current raw = 0x97 (151)
+    │  │  └── DC voltage raw = 0x97 (151) → 22.4 × 151/255 = 13.3V
     │  └───── Battery raw = 0x94 (148) → 22.8 × 148/255 = 13.2V
     └──────── VDC raw = 0xC5 (197) → 22.4 × 197/255 = 17.3V
 
@@ -608,10 +609,10 @@ RX: 50 00 81 64 ...35    ─── Response (empty)
 | `digiplex/partition/{id}`       | JSON: partition_id, label, arm_state, ...  | Yes    |
 | `digiplex/partition/{id}/state` | HA state string (see below)                | Yes    |
 | `digiplex/panel/info`           | JSON: product, software_version, serial    | Yes    |
-| `digiplex/panel/status`         | JSON: vdc, battery, dc_current, panel_time, trouble | Yes |
-| `digiplex/panel/vdc`            | Voltage string, e.g. `15.7`               | Yes    |
+| `digiplex/panel/status`         | JSON: vdc, battery, dc_voltage, trouble    | Yes    |
+| `digiplex/panel/vdc`            | Voltage string, e.g. `17.3`               | Yes    |
 | `digiplex/panel/battery`        | Voltage string, e.g. `13.2`               | Yes    |
-| `digiplex/panel/dc_current`     | Raw byte value                             | Yes    |
+| `digiplex/panel/dc`             | Voltage string, e.g. `13.3`               | Yes    |
 | `digiplex/panel/trouble`        | Trouble flags byte                         | Yes    |
 | `digiplex/panel/time`           | ISO 8601 datetime                          | Yes    |
 | `digiplex/group/{id}`            | JSON: group_id, label, state, partitions   | Yes    |
@@ -622,6 +623,7 @@ RX: 50 00 81 64 ...35    ─── Response (empty)
 | Topic                             | Payload                                         |
 |-----------------------------------|-------------------------------------------------|
 | `digiplex/partition/{id}/set`     | `ARM_AWAY`, `ARM_HOME`, `ARM_NIGHT`, `ARM_CUSTOM_BYPASS`, `DISARM` |
+| `digiplex/partition/{id}/beep`   | Any payload — sends beep command to partition keypad |
 | `digiplex/group/{id}/set`        | Same commands — applied to all partitions in the group atomically |
 
 ### HA Alarm State Mapping
@@ -646,7 +648,8 @@ RX: 50 00 81 64 ...35    ─── Response (empty)
 | `alarm_control_panel`  | Partition groups          | `homeassistant/alarm_control_panel/digiplex/group_{id}/config`    |
 | `sensor`               | Panel Voltage (VDC)       | `homeassistant/sensor/digiplex/panel_vdc/config`             |
 | `sensor`               | Battery Voltage           | `homeassistant/sensor/digiplex/panel_battery/config`         |
-| `sensor`               | DC Current                | `homeassistant/sensor/digiplex/panel_dc_current/config`      |
+| `sensor`               | DC Voltage                | `homeassistant/sensor/digiplex/panel_dc/config`              |
+| `button`               | Partition Beep            | `homeassistant/button/digiplex/partition_{id}_beep/config`   |
 | `sensor`               | Trouble Flags             | `homeassistant/sensor/digiplex/panel_trouble/config`         |
 
 ---

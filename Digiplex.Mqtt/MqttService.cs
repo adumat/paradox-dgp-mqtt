@@ -20,6 +20,8 @@ public class MqttOptions
   public string TopicPrefix { get; set; } = "digiplex";
   public bool EnableHomeAssistantDiscovery { get; set; } = true;
   public string HomeAssistantDiscoveryPrefix { get; set; } = "homeassistant";
+  /// <summary>Optional HA-side alarm code (PIN). When set, HA requires this code to arm/disarm.</summary>
+  public string? AlarmCode { get; set; }
 }
 
 /// <summary>
@@ -231,6 +233,17 @@ public class MqttService : IMqttService
       }
     }
 
+    // Handle partition beep: {prefix}/partition/{id}/beep
+    if (topic.StartsWith(partitionPrefix) && topic.EndsWith("/beep"))
+    {
+      var idStr = topic[partitionPrefix.Length..^5]; // extract id between prefix and /beep
+      if (int.TryParse(idStr, out var beepPartitionId) && beepPartitionId >= 1 && beepPartitionId <= 8)
+      {
+        _logger.LogInformation("Partition {Id} beep command", beepPartitionId);
+        _state.RequestPartitionCommand(new PartitionCommand(beepPartitionId, MonitoringCommands.Beep));
+      }
+    }
+
     // Handle panel time request: {prefix}/panel/time/get
     if (topic == $"{_options.TopicPrefix}/panel/time/get")
     {
@@ -276,6 +289,7 @@ public class MqttService : IMqttService
     var subscribeOptions = new MqttClientSubscribeOptionsBuilder()
         .WithTopicFilter($"{_options.TopicPrefix}/+/+/set")
         .WithTopicFilter($"{_options.TopicPrefix}/+/+/get")
+        .WithTopicFilter($"{_options.TopicPrefix}/+/+/beep")
         .Build();
 
     await _client!.SubscribeAsync(subscribeOptions, cancellationToken);
@@ -346,7 +360,7 @@ public class MqttService : IMqttService
       {
         vdc = status.Vdc,
         battery = status.BatteryVoltage,
-        dc_current = status.DcCurrent,
+        dc_voltage = status.DcVoltage,
         trouble = status.TroubleFlags
       }, JsonOptions);
 
@@ -355,7 +369,7 @@ public class MqttService : IMqttService
       // Publish individual sensor values for HA
       await PublishAsync($"{_options.TopicPrefix}/panel/vdc", status.Vdc.ToString("F1"), true);
       await PublishAsync($"{_options.TopicPrefix}/panel/battery", status.BatteryVoltage.ToString("F1"), true);
-      await PublishAsync($"{_options.TopicPrefix}/panel/dc_current", status.DcCurrent.ToString(), true);
+      await PublishAsync($"{_options.TopicPrefix}/panel/dc", status.DcVoltage.ToString("F1"), true);
       await PublishAsync($"{_options.TopicPrefix}/panel/trouble", status.TroubleFlags.ToString(), true);
     }));
 
@@ -446,7 +460,8 @@ public class MqttService : IMqttService
       identifiers = new[] { $"digiplex_{_state.PanelInfo?.ModuleSerialNumber}" },
       name = "Digiplex Panel",
       manufacturer = "Paradox",
-      model = _state.PanelInfo?.GetProductName() ?? "Unknown"
+      model = _state.PanelInfo?.GetProductName() ?? "Unknown",
+      sw_version = _state.PanelInfo?.GetSoftwareVersionString()
     };
   }
 
@@ -455,129 +470,154 @@ public class MqttService : IMqttService
     _logger.LogInformation("Publishing Home Assistant discovery config");
 
     var device = GetDeviceConfig();
+    var prefix = _options.TopicPrefix;
+    var ha = _options.HomeAssistantDiscoveryPrefix;
 
-    // Publish discovery for each known zone
+    // Build zone → device_class lookup: zone overrides > partition default > "motion"
+    var zoneDeviceClassMap = _partitionConfig.Items
+        .SelectMany(p => p.ZoneIds.Select(z => (z, p.DeviceClass)))
+        .ToDictionary(x => x.z, x => x.DeviceClass);
+    foreach (var ov in _partitionConfig.ZoneOverrides)
+      zoneDeviceClassMap[ov.Id] = ov.DeviceClass;
+
+    // Zone binary sensors
     foreach (var (zoneId, zone) in _state.Zones)
     {
       var config = new
       {
         name = string.IsNullOrEmpty(zone.Label) ? $"Zone {zoneId}" : zone.Label,
         unique_id = $"digiplex_zone_{zoneId}",
-        state_topic = $"{_options.TopicPrefix}/zone/{zoneId}/state",
-        json_attributes_topic = $"{_options.TopicPrefix}/zone/{zoneId}",
-        device_class = "motion",
+        state_topic = $"{prefix}/zone/{zoneId}/state",
+        json_attributes_topic = $"{prefix}/zone/{zoneId}",
+        device_class = zoneDeviceClassMap.GetValueOrDefault(zoneId, "motion"),
         payload_on = "ON",
         payload_off = "OFF",
-        availability_topic = $"{_options.TopicPrefix}/status",
+        availability_topic = $"{prefix}/status",
         device
       };
 
-      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/binary_sensor/digiplex/zone_{zoneId}/config";
-      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+      await PublishAsync($"{ha}/binary_sensor/digiplex/zone_{zoneId}/config",
+          JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
     }
 
-    // Publish discovery for each known partition (alarm_control_panel)
+    // Partition alarm control panels
     foreach (var (partitionId, partition) in _state.Partitions)
     {
-      var config = new
+      await PublishAlarmPanelDiscoveryAsync(
+          $"partition_{partitionId}",
+          string.IsNullOrEmpty(partition.Label) ? $"Partition {partitionId}" : partition.Label,
+          $"{prefix}/partition/{partitionId}",
+          device, cancellationToken);
+
+      // Beep button per partition
+      var beepConfig = new
       {
-        name = string.IsNullOrEmpty(partition.Label) ? $"Partition {partitionId}" : partition.Label,
-        unique_id = $"digiplex_partition_{partitionId}",
-        state_topic = $"{_options.TopicPrefix}/partition/{partitionId}/state",
-        command_topic = $"{_options.TopicPrefix}/partition/{partitionId}/set",
-        json_attributes_topic = $"{_options.TopicPrefix}/partition/{partitionId}",
-        availability_topic = $"{_options.TopicPrefix}/status",
-        supported_features = new[] { "arm_away", "arm_home", "arm_night", "arm_custom_bypass" },
+        name = $"{(string.IsNullOrEmpty(partition.Label) ? $"Partition {partitionId}" : partition.Label)} Beep",
+        unique_id = $"digiplex_partition_{partitionId}_beep",
+        command_topic = $"{prefix}/partition/{partitionId}/beep",
+        availability_topic = $"{prefix}/status",
+        icon = "mdi:volume-high",
+        entity_category = "config",
         device
       };
 
-      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/alarm_control_panel/digiplex/partition_{partitionId}/config";
-      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+      await PublishAsync($"{ha}/button/digiplex/partition_{partitionId}_beep/config",
+          JsonSerializer.Serialize(beepConfig, JsonOptions), true, cancellationToken);
     }
 
-    // Publish discovery for each partition group (alarm_control_panel)
+    // Group alarm control panels
     foreach (var group in _partitionConfig.Groups)
     {
-      var config = new
-      {
-        name = group.Label,
-        unique_id = $"digiplex_group_{group.Id}",
-        state_topic = $"{_options.TopicPrefix}/group/{group.Id}/state",
-        command_topic = $"{_options.TopicPrefix}/group/{group.Id}/set",
-        json_attributes_topic = $"{_options.TopicPrefix}/group/{group.Id}",
-        availability_topic = $"{_options.TopicPrefix}/status",
-        supported_features = new[] { "arm_away", "arm_home", "arm_night", "arm_custom_bypass" },
-        device
-      };
-
-      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/alarm_control_panel/digiplex/group_{group.Id}/config";
-      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+      await PublishAlarmPanelDiscoveryAsync(
+          $"group_{group.Id}",
+          group.Label,
+          $"{prefix}/group/{group.Id}",
+          device, cancellationToken);
     }
 
-    // Publish discovery for panel voltage sensor
+    // Panel voltage sensor (diagnostic)
+    await PublishAsync($"{ha}/sensor/digiplex/panel_vdc/config", JsonSerializer.Serialize(new
     {
-      var config = new
-      {
-        name = "Panel Voltage",
-        unique_id = "digiplex_panel_vdc",
-        state_topic = $"{_options.TopicPrefix}/panel/vdc",
-        device_class = "voltage",
-        unit_of_measurement = "V",
-        availability_topic = $"{_options.TopicPrefix}/status",
-        device
-      };
+      name = "Panel Voltage",
+      unique_id = "digiplex_panel_vdc",
+      state_topic = $"{prefix}/panel/vdc",
+      device_class = "voltage",
+      state_class = "measurement",
+      unit_of_measurement = "V",
+      entity_category = "diagnostic",
+      availability_topic = $"{prefix}/status",
+      device
+    }, JsonOptions), true, cancellationToken);
 
-      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/sensor/digiplex/panel_vdc/config";
-      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
-    }
-
-    // Publish discovery for battery voltage sensor
+    // Battery voltage sensor (diagnostic)
+    await PublishAsync($"{ha}/sensor/digiplex/panel_battery/config", JsonSerializer.Serialize(new
     {
-      var config = new
-      {
-        name = "Battery Voltage",
-        unique_id = "digiplex_panel_battery",
-        state_topic = $"{_options.TopicPrefix}/panel/battery",
-        device_class = "voltage",
-        unit_of_measurement = "V",
-        availability_topic = $"{_options.TopicPrefix}/status",
-        device
-      };
+      name = "Battery Voltage",
+      unique_id = "digiplex_panel_battery",
+      state_topic = $"{prefix}/panel/battery",
+      device_class = "voltage",
+      state_class = "measurement",
+      unit_of_measurement = "V",
+      entity_category = "diagnostic",
+      availability_topic = $"{prefix}/status",
+      device
+    }, JsonOptions), true, cancellationToken);
 
-      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/sensor/digiplex/panel_battery/config";
-      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
-    }
-
-    // Publish discovery for DC current sensor
+    // DC output voltage sensor (diagnostic)
+    await PublishAsync($"{ha}/sensor/digiplex/panel_dc/config", JsonSerializer.Serialize(new
     {
-      var config = new
-      {
-        name = "DC Current",
-        unique_id = "digiplex_panel_dc_current",
-        state_topic = $"{_options.TopicPrefix}/panel/dc_current",
-        device_class = "current",
-        availability_topic = $"{_options.TopicPrefix}/status",
-        device
-      };
+      name = "DC Voltage",
+      unique_id = "digiplex_panel_dc",
+      state_topic = $"{prefix}/panel/dc",
+      device_class = "voltage",
+      state_class = "measurement",
+      unit_of_measurement = "V",
+      entity_category = "diagnostic",
+      availability_topic = $"{prefix}/status",
+      device
+    }, JsonOptions), true, cancellationToken);
 
-      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/sensor/digiplex/panel_dc_current/config";
-      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
-    }
-
-    // Publish discovery for trouble flags sensor
+    // Trouble flags sensor (diagnostic)
+    await PublishAsync($"{ha}/sensor/digiplex/panel_trouble/config", JsonSerializer.Serialize(new
     {
-      var config = new
-      {
-        name = "Trouble Flags",
-        unique_id = "digiplex_panel_trouble",
-        state_topic = $"{_options.TopicPrefix}/panel/trouble",
-        availability_topic = $"{_options.TopicPrefix}/status",
-        device
-      };
+      name = "Trouble Flags",
+      unique_id = "digiplex_panel_trouble",
+      state_topic = $"{prefix}/panel/trouble",
+      entity_category = "diagnostic",
+      availability_topic = $"{prefix}/status",
+      device
+    }, JsonOptions), true, cancellationToken);
+  }
 
-      var topic = $"{_options.HomeAssistantDiscoveryPrefix}/sensor/digiplex/panel_trouble/config";
-      await PublishAsync(topic, JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+  private async Task PublishAlarmPanelDiscoveryAsync(
+      string uniqueSuffix, string name, string baseTopic,
+      object device, CancellationToken cancellationToken)
+  {
+    var ha = _options.HomeAssistantDiscoveryPrefix;
+
+    // Build discovery payload — include code fields only when AlarmCode is configured
+    var configDict = new Dictionary<string, object?>
+    {
+      ["name"] = name,
+      ["unique_id"] = $"digiplex_{uniqueSuffix}",
+      ["state_topic"] = $"{baseTopic}/state",
+      ["command_topic"] = $"{baseTopic}/set",
+      ["json_attributes_topic"] = baseTopic,
+      ["availability_topic"] = $"{_options.TopicPrefix}/status",
+      ["supported_features"] = new[] { "arm_away", "arm_home", "arm_night", "arm_custom_bypass" },
+      ["device"] = device
+    };
+
+    if (!string.IsNullOrEmpty(_options.AlarmCode))
+    {
+      configDict["code"] = _options.AlarmCode;
+      configDict["code_arm_required"] = true;
+      configDict["code_disarm_required"] = true;
+      configDict["code_trigger_required"] = false;
     }
+
+    await PublishAsync($"{ha}/alarm_control_panel/digiplex/{uniqueSuffix}/config",
+        JsonSerializer.Serialize(configDict, JsonOptions), true, cancellationToken);
   }
 
   public async ValueTask DisposeAsync()

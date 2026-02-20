@@ -18,15 +18,43 @@ services:
       - Mqtt__Password=${MQTT_PASSWORD:-}
       - Mqtt__TopicPrefix=${MQTT_TOPIC_PREFIX:-digiplex}
       - Mqtt__EnableHomeAssistantDiscovery=${MQTT_HA_DISCOVERY:-true}
-      # Partition items
+      #- Mqtt__AlarmCode=1234  # Optional: require PIN in HA to arm/disarm
+      # Partition items (DeviceClass = HA binary_sensor class for zones in this partition)
       - Partitions__Items__0__Id=1
       - Partitions__Items__0__Label=Contatti Piano Terra
+      - Partitions__Items__0__DeviceClass=opening
+      - Partitions__Items__0__ZoneIds__0=1
+      - Partitions__Items__0__ZoneIds__1=2
+      - Partitions__Items__0__ZoneIds__2=3
+      - Partitions__Items__0__ZoneIds__3=4
+      - Partitions__Items__0__ZoneIds__4=5
+      - Partitions__Items__0__ZoneIds__5=6
       - Partitions__Items__1__Id=2
       - Partitions__Items__1__Label=Contatti Primo Piano
+      - Partitions__Items__1__DeviceClass=opening
+      - Partitions__Items__1__ZoneIds__0=7
+      - Partitions__Items__1__ZoneIds__1=8
+      - Partitions__Items__1__ZoneIds__2=9
+      - Partitions__Items__1__ZoneIds__3=10
+      - Partitions__Items__1__ZoneIds__4=11
+      - Partitions__Items__1__ZoneIds__5=12
       - Partitions__Items__2__Id=3
       - Partitions__Items__2__Label=Radar Piano Terra
+      - Partitions__Items__2__DeviceClass=motion
+      - Partitions__Items__2__ZoneIds__0=13
+      - Partitions__Items__2__ZoneIds__1=14
+      - Partitions__Items__2__ZoneIds__2=15
+      - Partitions__Items__2__ZoneIds__3=16
       - Partitions__Items__3__Id=4
       - Partitions__Items__3__Label=Radar Primo Piano
+      - Partitions__Items__3__DeviceClass=motion
+      - Partitions__Items__3__ZoneIds__0=17
+      - Partitions__Items__3__ZoneIds__1=18
+      - Partitions__Items__3__ZoneIds__2=19
+      - Partitions__Items__3__ZoneIds__3=20
+      # Per-zone device_class overrides (takes precedence over partition default)
+      #- Partitions__ZoneOverrides__0__Id=3
+      #- Partitions__ZoneOverrides__0__DeviceClass=door
       # Partition groups
       - Partitions__Groups__0__Id=contatti
       - Partitions__Groups__0__Label=Contatti
