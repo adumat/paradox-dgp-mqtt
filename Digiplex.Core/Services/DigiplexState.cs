@@ -16,6 +16,7 @@ public class DigiplexState : IDigiplexState, IDisposable
   private readonly Subject<PartitionCommand> _partitionCommandSubject = new();
   private readonly Subject<MultiPartitionCommand> _multiPartitionCommandSubject = new();
   private readonly Subject<SystemStatus> _systemStatusSubject = new();
+  private readonly Subject<bool> _dataReadySubject = new();
 
   private readonly Dictionary<int, ZoneStatus> _zones = new();
   private readonly Dictionary<int, PartitionStatus> _partitions = new();
@@ -43,6 +44,8 @@ public class DigiplexState : IDigiplexState, IDisposable
   public SystemStatus? SystemStatus => _systemStatus;
   public IObservable<SystemStatus> SystemStatusChanged => _systemStatusSubject
       .DistinctUntilChanged(s => (s.Vdc, s.BatteryVoltage, s.DcVoltage, s.TroubleFlags));
+
+  public IObservable<bool> DataReady => _dataReadySubject.AsObservable();
 
   public IReadOnlyDictionary<string, Dictionary<int, string>> Labels => _labels;
 
@@ -208,6 +211,14 @@ public class DigiplexState : IDigiplexState, IDisposable
   }
 
   /// <summary>
+  /// Signal that initial data (labels, zones, partitions) has been loaded and is ready
+  /// </summary>
+  public void SignalDataReady()
+  {
+    _dataReadySubject.OnNext(true);
+  }
+
+  /// <summary>
   /// Set a label for an entity
   /// </summary>
   public void SetLabel(string type, int id, string label)
@@ -262,5 +273,6 @@ public class DigiplexState : IDigiplexState, IDisposable
     _partitionCommandSubject.Dispose();
     _multiPartitionCommandSubject.Dispose();
     _systemStatusSubject.Dispose();
+    _dataReadySubject.Dispose();
   }
 }

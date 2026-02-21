@@ -102,6 +102,8 @@ public class MockSerialService : ISerialService
     _state.UpdatePartitionsFromData(_partitionData, partitionCount);
     _logger.LogInformation("Loaded {Count} mock partition labels", partitionCount);
 
+    _state.SignalDataReady();
+
     // Subscribe to partition commands
     _commandSubscription = _state.PartitionCommandRequested.Subscribe(cmd =>
     {

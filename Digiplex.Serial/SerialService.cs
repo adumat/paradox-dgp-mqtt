@@ -320,6 +320,7 @@ public class SerialService : ISerialService
 
     // First load labels
     await LoadLabelsAsync(cancellationToken);
+    var firstPoll = true;
 
     while (!cancellationToken.IsCancellationRequested)
     {
@@ -366,6 +367,12 @@ public class SerialService : ISerialService
         if (systemResponse is ReadResponsePdu systemData)
         {
           _state.UpdateSystemStatus(systemData.Data);
+        }
+
+        if (firstPoll)
+        {
+          firstPoll = false;
+          _state.SignalDataReady();
         }
 
         await Task.Delay(_options.PollIntervalMs, cancellationToken);

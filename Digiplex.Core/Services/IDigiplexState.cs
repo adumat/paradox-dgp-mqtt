@@ -94,4 +94,10 @@ public interface IDigiplexState
   /// Labels loaded from panel
   /// </summary>
   IReadOnlyDictionary<string, Dictionary<int, string>> Labels { get; }
+
+  /// <summary>
+  /// Fires when initial data (labels, zones, partitions) is loaded and ready.
+  /// Fires on each serial reconnect.
+  /// </summary>
+  IObservable<bool> DataReady { get; }
 }

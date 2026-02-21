@@ -22,6 +22,8 @@ public class MqttOptions
   public string HomeAssistantDiscoveryPrefix { get; set; } = "homeassistant";
   /// <summary>Optional HA-side alarm code (PIN). When set, HA requires this code to arm/disarm.</summary>
   public string? AlarmCode { get; set; }
+  /// <summary>Interval in hours to re-publish HA discovery config. Default 24 (once per day). 0 disables.</summary>
+  public int DiscoveryRepublishIntervalHours { get; set; } = 24;
 }
 
 /// <summary>
@@ -37,6 +39,7 @@ public class MqttService : IMqttService
   private IMqttClient? _client;
   private CancellationTokenSource? _cts;
   private readonly List<IDisposable> _subscriptions = [];
+  private Timer? _discoveryTimer;
 
   private static readonly JsonSerializerOptions JsonOptions = new()
   {
@@ -85,6 +88,9 @@ public class MqttService : IMqttService
       subscription.Dispose();
     }
     _subscriptions.Clear();
+
+    _discoveryTimer?.Dispose();
+    _discoveryTimer = null;
 
     if (_client?.IsConnected == true)
     {
@@ -138,12 +144,6 @@ public class MqttService : IMqttService
 
       // Subscribe to command topics
       await SubscribeToCommandsAsync(cancellationToken);
-
-      // Publish Home Assistant discovery if enabled
-      if (_options.EnableHomeAssistantDiscovery)
-      {
-        await PublishHomeAssistantDiscoveryAsync(cancellationToken);
-      }
     }
     catch (Exception ex)
     {
@@ -373,6 +373,17 @@ public class MqttService : IMqttService
       await PublishAsync($"{_options.TopicPrefix}/panel/trouble", status.TroubleFlags.ToString(), true);
     }));
 
+    // Publish HA discovery when serial data is ready (and on reconnects)
+    if (_options.EnableHomeAssistantDiscovery)
+    {
+      _subscriptions.Add(_state.DataReady.Subscribe(async _ =>
+      {
+        _logger.LogInformation("Panel data ready, publishing HA discovery");
+        await PublishHomeAssistantDiscoveryAsync();
+        RestartDiscoveryTimer();
+      }));
+    }
+
     // Subscribe to panel info changes
     _subscriptions.Add(_state.PanelInfoChanged.Subscribe(async info =>
     {
@@ -437,6 +448,29 @@ public class MqttService : IMqttService
     return "armed_away";
   }
 
+  private void RestartDiscoveryTimer()
+  {
+    _discoveryTimer?.Dispose();
+    _discoveryTimer = null;
+
+    var hours = _options.DiscoveryRepublishIntervalHours;
+    if (hours <= 0) return;
+
+    var interval = TimeSpan.FromHours(hours);
+    _discoveryTimer = new Timer(async _ =>
+    {
+      try
+      {
+        _logger.LogInformation("Periodic HA discovery re-publish");
+        await PublishHomeAssistantDiscoveryAsync();
+      }
+      catch (Exception ex)
+      {
+        _logger.LogWarning(ex, "Failed to re-publish HA discovery");
+      }
+    }, null, interval, interval);
+  }
+
   private async Task PublishAsync(string topic, string payload, bool retain, CancellationToken cancellationToken = default)
   {
     if (_client?.IsConnected != true)
@@ -465,7 +499,7 @@ public class MqttService : IMqttService
     };
   }
 
-  private async Task PublishHomeAssistantDiscoveryAsync(CancellationToken cancellationToken)
+  private async Task PublishHomeAssistantDiscoveryAsync(CancellationToken cancellationToken = default)
   {
     _logger.LogInformation("Publishing Home Assistant discovery config");
 
