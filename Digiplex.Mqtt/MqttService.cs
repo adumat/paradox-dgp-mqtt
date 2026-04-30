@@ -75,8 +75,33 @@ public class MqttService : IMqttService
     _client.DisconnectedAsync += OnDisconnectedAsync;
     _client.ApplicationMessageReceivedAsync += OnMessageReceivedAsync;
 
-    await ConnectAsync(cancellationToken);
     SubscribeToStateChanges();
+    await ConnectWithRetryAsync(cancellationToken);
+  }
+
+  private async Task ConnectWithRetryAsync(CancellationToken cancellationToken)
+  {
+    var attempt = 0;
+    while (!cancellationToken.IsCancellationRequested)
+    {
+      try
+      {
+        await ConnectAsync(cancellationToken);
+        return;
+      }
+      catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+      {
+        throw;
+      }
+      catch (Exception ex)
+      {
+        attempt++;
+        var delaySeconds = Math.Min(60, (int)Math.Pow(2, Math.Min(attempt, 6)));
+        _logger.LogWarning("MQTT connect attempt {Attempt} failed ({Error}); retrying in {Delay}s",
+            attempt, ex.GetType().Name, delaySeconds);
+        await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
+      }
+    }
   }
 
   public async Task StopAsync(CancellationToken cancellationToken = default)

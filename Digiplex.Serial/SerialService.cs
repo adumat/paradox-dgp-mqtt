@@ -38,6 +38,7 @@ public class SerialService : ISerialService
   private IDisposable? _commandSubscription;
   private IDisposable? _multiCommandSubscription;
   private readonly SemaphoreSlim _sendLock = new(1, 1);
+  private bool _stopped;
 
   private static readonly byte[] InitString =
   [
@@ -130,6 +131,9 @@ public class SerialService : ISerialService
 
   public async Task StopAsync(CancellationToken cancellationToken = default)
   {
+    if (_stopped) return;
+    _stopped = true;
+
     _logger.LogInformation("Stopping serial service");
 
     _commandSubscription?.Dispose();
@@ -162,7 +166,14 @@ public class SerialService : ISerialService
     _serialPort?.Dispose();
     _serialPort = null;
 
-    _state.SetConnectionState(ConnectionState.Disconnected);
+    try
+    {
+      _state.SetConnectionState(ConnectionState.Disconnected);
+    }
+    catch (ObjectDisposedException)
+    {
+      // State container already disposed during shutdown — nothing to publish to.
+    }
   }
 
   public async Task SendAsync(PduBase pdu, CancellationToken cancellationToken = default)
