@@ -508,8 +508,23 @@ public class MqttService : IMqttService
         .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
         .Build();
 
-    await _client.PublishAsync(message, cancellationToken);
-    _logger.LogDebug("Published to {Topic}: {Payload}", topic, payload);
+    // Swallow transient publish errors — the IsConnected check is racy with mid-flight
+    // disconnects, and these are called from fire-and-forget Subscribe(async ...) handlers
+    // where any escaping exception becomes an unobserved "Unhandled exception" and leaks
+    // threadpool work. Retained topics + reconnect catch the state back up.
+    try
+    {
+      await _client.PublishAsync(message, cancellationToken);
+      _logger.LogDebug("Published to {Topic}: {Payload}", topic, payload);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception ex)
+    {
+      _logger.LogDebug(ex, "Failed to publish to {Topic} (will retry on next state change)", topic);
+    }
   }
 
   private object GetDeviceConfig()
