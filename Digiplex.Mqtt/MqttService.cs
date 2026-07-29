@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using Digiplex.Core.Models;
@@ -6,6 +5,9 @@ using Digiplex.Core.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MQTTnet;
+using MQTTnet.Client;
+using MQTTnet.Extensions.ManagedClient;
+using MQTTnet.Packets;
 using MQTTnet.Protocol;
 
 namespace Digiplex.Mqtt;
@@ -24,10 +26,19 @@ public class MqttOptions
   public string? AlarmCode { get; set; }
   /// <summary>Interval in hours to re-publish HA discovery config. Default 24 (once per day). 0 disables.</summary>
   public int DiscoveryRepublishIntervalHours { get; set; } = 24;
+  /// <summary>Keep-alive period in seconds sent to the broker.</summary>
+  public int KeepAliveSeconds { get; set; } = 30;
+  /// <summary>Delay before the managed client auto-reconnects, in seconds.</summary>
+  public int ReconnectDelaySeconds { get; set; } = 5;
 }
 
 /// <summary>
-/// MQTT service for publishing Digiplex state and receiving commands
+/// MQTT service for publishing Digiplex state and receiving commands.
+/// Uses MQTTnet's <see cref="IManagedMqttClient"/>, which owns the connection,
+/// auto-reconnect (with backoff), subscription restore and an outbound queue — so a
+/// broker drop can never wedge the process. (The previous manual reconnect, done by
+/// calling ConnectAsync from inside the DisconnectedAsync callback, deadlocked under
+/// a flapping broker and pegged a CPU core.)
 /// </summary>
 public class MqttService : IMqttService
 {
@@ -36,10 +47,10 @@ public class MqttService : IMqttService
   private readonly PartitionConfig _partitionConfig;
   private readonly DigiplexState _state;
 
-  private IMqttClient? _client;
-  private CancellationTokenSource? _cts;
+  private IManagedMqttClient? _client;
   private readonly List<IDisposable> _subscriptions = [];
   private Timer? _discoveryTimer;
+  private volatile bool _stopping;
 
   private static readonly JsonSerializerOptions JsonOptions = new()
   {
@@ -67,144 +78,95 @@ public class MqttService : IMqttService
     _logger.LogInformation("Starting MQTT service, connecting to {Host}:{Port}",
         _options.BrokerHost, _options.BrokerPort);
 
-    _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    var factory = new MqttFactory();
+    _client = factory.CreateManagedMqttClient();
 
-    var factory = new MqttClientFactory();
-    _client = factory.CreateMqttClient();
-
+    _client.ConnectedAsync += OnConnectedAsync;
     _client.DisconnectedAsync += OnDisconnectedAsync;
+    _client.ConnectingFailedAsync += OnConnectingFailedAsync;
     _client.ApplicationMessageReceivedAsync += OnMessageReceivedAsync;
 
-    SubscribeToStateChanges();
-    await ConnectWithRetryAsync(cancellationToken);
-  }
-
-  private async Task ConnectWithRetryAsync(CancellationToken cancellationToken)
-  {
-    var attempt = 0;
-    while (!cancellationToken.IsCancellationRequested)
-    {
-      try
-      {
-        await ConnectAsync(cancellationToken);
-        return;
-      }
-      catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-      {
-        throw;
-      }
-      catch (Exception ex)
-      {
-        attempt++;
-        var delaySeconds = Math.Min(60, (int)Math.Pow(2, Math.Min(attempt, 6)));
-        _logger.LogWarning("MQTT connect attempt {Attempt} failed ({Error}); retrying in {Delay}s",
-            attempt, ex.GetType().Name, delaySeconds);
-        await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
-      }
-    }
-  }
-
-  public async Task StopAsync(CancellationToken cancellationToken = default)
-  {
-    _logger.LogInformation("Stopping MQTT service");
-
-    foreach (var subscription in _subscriptions)
-    {
-      subscription.Dispose();
-    }
-    _subscriptions.Clear();
-
-    _discoveryTimer?.Dispose();
-    _discoveryTimer = null;
-
-    if (_client?.IsConnected == true)
-    {
-      // Publish offline status
-      await PublishAsync($"{_options.TopicPrefix}/status", "offline", true, cancellationToken);
-
-      var disconnectOptions = new MqttClientDisconnectOptionsBuilder()
-          .WithReason(MqttClientDisconnectOptionsReason.NormalDisconnection)
-          .Build();
-
-      await _client.DisconnectAsync(disconnectOptions, cancellationToken);
-    }
-
-    _client?.Dispose();
-    _client = null;
-
-    _cts?.Cancel();
-    _cts?.Dispose();
-    _cts = null;
-  }
-
-  private async Task ConnectAsync(CancellationToken cancellationToken)
-  {
-    var optionsBuilder = new MqttClientOptionsBuilder()
+    var clientOptionsBuilder = new MqttClientOptionsBuilder()
         .WithTcpServer(_options.BrokerHost, _options.BrokerPort)
-        .WithTlsOptions(new MqttClientTlsOptions
-        {
-          UseTls = _options.BrokerPort == 8883, // Assume TLS if using standard secure MQTT port
-          AllowUntrustedCertificates = false, // Adjust as needed for production
-        })
         .WithClientId(_options.ClientId)
+        .WithKeepAlivePeriod(TimeSpan.FromSeconds(_options.KeepAliveSeconds))
         .WithWillTopic($"{_options.TopicPrefix}/status")
         .WithWillPayload("offline"u8.ToArray())
         .WithWillRetain(true)
         .WithCleanSession(true);
 
+    if (_options.BrokerPort == 8883)
+      clientOptionsBuilder.WithTlsOptions(o => o.UseTls(true));
+
     if (!string.IsNullOrEmpty(_options.Username))
+      clientOptionsBuilder.WithCredentials(_options.Username, _options.Password);
+
+    var managedOptions = new ManagedMqttClientOptionsBuilder()
+        .WithClientOptions(clientOptionsBuilder.Build())
+        .WithAutoReconnectDelay(TimeSpan.FromSeconds(_options.ReconnectDelaySeconds))
+        .WithMaxPendingMessages(1000)
+        .Build();
+
+    SubscribeToStateChanges();
+
+    // StartAsync connects in the background and keeps the connection alive; it does
+    // NOT throw when the broker is down — it retries. Subscriptions are remembered by
+    // the managed client and re-applied automatically on every (re)connect.
+    await _client.StartAsync(managedOptions);
+    await SubscribeToCommandsAsync();
+  }
+
+  public async Task StopAsync(CancellationToken cancellationToken = default)
+  {
+    _logger.LogInformation("Stopping MQTT service");
+    _stopping = true;
+
+    foreach (var subscription in _subscriptions)
+      subscription.Dispose();
+    _subscriptions.Clear();
+
+    _discoveryTimer?.Dispose();
+    _discoveryTimer = null;
+
+    if (_client != null)
     {
-      optionsBuilder.WithCredentials(_options.Username, _options.Password);
-    }
+      if (_client.IsConnected)
+        await EnqueueAsync($"{_options.TopicPrefix}/status", "offline", true);
 
-    var options = optionsBuilder.Build();
-
-    try
-    {
-      await _client!.ConnectAsync(options, cancellationToken);
-      _logger.LogInformation("Connected to MQTT broker");
-
-      // Publish online status
-      await PublishAsync($"{_options.TopicPrefix}/status", "online", true, cancellationToken);
-
-      // Subscribe to command topics
-      await SubscribeToCommandsAsync(cancellationToken);
-    }
-    catch (Exception ex)
-    {
-      _logger.LogError(ex, "Failed to connect to MQTT broker");
-      throw;
+      await _client.StopAsync();
+      _client.Dispose();
+      _client = null;
     }
   }
 
-  private async Task OnDisconnectedAsync(MqttClientDisconnectedEventArgs args)
+  private async Task OnConnectedAsync(MqttClientConnectedEventArgs args)
   {
-    if (_cts?.IsCancellationRequested == true)
-      return;
+    _logger.LogInformation("Connected to MQTT broker");
+    // (Re)publish online status on every (re)connect. Command-topic subscriptions
+    // are restored automatically by the managed client.
+    await EnqueueAsync($"{_options.TopicPrefix}/status", "online", true);
+  }
 
-    _logger.LogWarning("Disconnected from MQTT broker: {Reason}", args.Reason);
+  private Task OnDisconnectedAsync(MqttClientDisconnectedEventArgs args)
+  {
+    // Observe only — the managed client reconnects on its own. No manual reconnect.
+    if (!_stopping)
+      _logger.LogWarning("Disconnected from MQTT broker: {Reason}", args.Reason);
+    return Task.CompletedTask;
+  }
 
-    // Attempt reconnection
-    await Task.Delay(5000);
-
-    try
-    {
-      if (_cts?.IsCancellationRequested == false)
-      {
-        await ConnectAsync(_cts.Token);
-      }
-    }
-    catch (Exception ex)
-    {
-      _logger.LogError(ex, "Reconnection failed");
-    }
+  private Task OnConnectingFailedAsync(ConnectingFailedEventArgs args)
+  {
+    if (!_stopping)
+      _logger.LogWarning("MQTT connection attempt failed ({Error}); will retry",
+          args.Exception?.GetType().Name ?? "unknown");
+    return Task.CompletedTask;
   }
 
   private async Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args)
   {
     var topic = args.ApplicationMessage.Topic;
-    var payloadBytes = args.ApplicationMessage.Payload;
-    var payload = payloadBytes.Length > 0 ? Encoding.UTF8.GetString(payloadBytes) : string.Empty;
+    var payload = args.ApplicationMessage.ConvertPayloadToString() ?? string.Empty;
 
     _logger.LogDebug("Received message on {Topic}: {Payload}", topic, payload);
 
@@ -275,7 +237,7 @@ public class MqttService : IMqttService
       var systemStatus = _state.SystemStatus;
       if (systemStatus != null)
       {
-        await PublishAsync($"{_options.TopicPrefix}/panel/time", systemStatus.PanelTime.ToString("o"), false);
+        await EnqueueAsync($"{_options.TopicPrefix}/panel/time", systemStatus.PanelTime.ToString("o"), false);
       }
     }
   }
@@ -309,15 +271,17 @@ public class MqttService : IMqttService
     };
   }
 
-  private async Task SubscribeToCommandsAsync(CancellationToken cancellationToken)
+  private async Task SubscribeToCommandsAsync()
   {
-    var subscribeOptions = new MqttClientSubscribeOptionsBuilder()
-        .WithTopicFilter($"{_options.TopicPrefix}/+/+/set")
-        .WithTopicFilter($"{_options.TopicPrefix}/+/+/get")
-        .WithTopicFilter($"{_options.TopicPrefix}/+/+/beep")
-        .Build();
+    var filters = new List<MqttTopicFilter>
+    {
+      new MqttTopicFilterBuilder().WithTopic($"{_options.TopicPrefix}/+/+/set").Build(),
+      new MqttTopicFilterBuilder().WithTopic($"{_options.TopicPrefix}/+/+/get").Build(),
+      new MqttTopicFilterBuilder().WithTopic($"{_options.TopicPrefix}/+/+/beep").Build()
+    };
 
-    await _client!.SubscribeAsync(subscribeOptions, cancellationToken);
+    // Managed client remembers these and re-subscribes automatically after reconnects.
+    await _client!.SubscribeAsync(filters);
     _logger.LogDebug("Subscribed to command topics");
   }
 
@@ -326,7 +290,7 @@ public class MqttService : IMqttService
     // Subscribe to connection state changes
     _subscriptions.Add(_state.ConnectionStateChanged.Subscribe(async state =>
     {
-      await PublishAsync($"{_options.TopicPrefix}/connection", state.ToString().ToLower(), true);
+      await EnqueueAsync($"{_options.TopicPrefix}/connection", state.ToString().ToLower(), true);
     }));
 
     // Subscribe to zone changes
@@ -340,10 +304,10 @@ public class MqttService : IMqttService
         state = evt.NewStatus.State.ToString().ToLower()
       }, JsonOptions);
 
-      await PublishAsync(topic, payload, true);
+      await EnqueueAsync(topic, payload, true);
 
       // Also publish simple state for Home Assistant binary sensors
-      await PublishAsync($"{topic}/state", evt.NewStatus.State == ZoneState.Ok ? "OFF" : "ON", true);
+      await EnqueueAsync($"{topic}/state", evt.NewStatus.State == ZoneState.Ok ? "OFF" : "ON", true);
     }));
 
     // Subscribe to partition changes
@@ -362,11 +326,11 @@ public class MqttService : IMqttService
         alarm_in_memory = evt.NewStatus.AlarmInMemory
       }, JsonOptions);
 
-      await PublishAsync(topic, payload, true);
+      await EnqueueAsync(topic, payload, true);
 
       // Publish HA alarm state string
       var haState = MapToHaState(evt.NewStatus);
-      await PublishAsync($"{topic}/state", haState, true);
+      await EnqueueAsync($"{topic}/state", haState, true);
 
       // Update group states for any group containing this partition
       foreach (var group in _partitionConfig.Groups)
@@ -389,13 +353,13 @@ public class MqttService : IMqttService
         trouble = status.TroubleFlags
       }, JsonOptions);
 
-      await PublishAsync($"{_options.TopicPrefix}/panel/status", payload, true);
+      await EnqueueAsync($"{_options.TopicPrefix}/panel/status", payload, true);
 
       // Publish individual sensor values for HA
-      await PublishAsync($"{_options.TopicPrefix}/panel/vdc", status.Vdc.ToString("F1"), true);
-      await PublishAsync($"{_options.TopicPrefix}/panel/battery", status.BatteryVoltage.ToString("F1"), true);
-      await PublishAsync($"{_options.TopicPrefix}/panel/dc", status.DcVoltage.ToString("F1"), true);
-      await PublishAsync($"{_options.TopicPrefix}/panel/trouble", status.TroubleFlags.ToString(), true);
+      await EnqueueAsync($"{_options.TopicPrefix}/panel/vdc", status.Vdc.ToString("F1"), true);
+      await EnqueueAsync($"{_options.TopicPrefix}/panel/battery", status.BatteryVoltage.ToString("F1"), true);
+      await EnqueueAsync($"{_options.TopicPrefix}/panel/dc", status.DcVoltage.ToString("F1"), true);
+      await EnqueueAsync($"{_options.TopicPrefix}/panel/trouble", status.TroubleFlags.ToString(), true);
     }));
 
     // Publish HA discovery when serial data is ready (and on reconnects)
@@ -419,7 +383,7 @@ public class MqttService : IMqttService
         serial_number = info.ModuleSerialNumber
       }, JsonOptions);
 
-      await PublishAsync($"{_options.TopicPrefix}/panel/info", payload, true);
+      await EnqueueAsync($"{_options.TopicPrefix}/panel/info", payload, true);
     }));
   }
 
@@ -447,8 +411,8 @@ public class MqttService : IMqttService
       })
     }, JsonOptions);
 
-    await PublishAsync(topic, payload, true);
-    await PublishAsync($"{topic}/state", groupState, true);
+    await EnqueueAsync(topic, payload, true);
+    await EnqueueAsync($"{topic}/state", groupState, true);
   }
 
   private static string AggregateGroupState(List<PartitionStatus> members)
@@ -496,10 +460,14 @@ public class MqttService : IMqttService
     }, null, interval, interval);
   }
 
-  private async Task PublishAsync(string topic, string payload, bool retain, CancellationToken cancellationToken = default)
+  /// <summary>
+  /// Queue a message on the managed client. The queue drains when connected and
+  /// survives short disconnects, so callers never block on — or throw from — a
+  /// mid-flight broker drop. Retained topics + reconnect bring state back up.
+  /// </summary>
+  private async Task EnqueueAsync(string topic, string payload, bool retain)
   {
-    if (_client?.IsConnected != true)
-      return;
+    if (_client == null) return;
 
     var message = new MqttApplicationMessageBuilder()
         .WithTopic(topic)
@@ -508,22 +476,14 @@ public class MqttService : IMqttService
         .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
         .Build();
 
-    // Swallow transient publish errors — the IsConnected check is racy with mid-flight
-    // disconnects, and these are called from fire-and-forget Subscribe(async ...) handlers
-    // where any escaping exception becomes an unobserved "Unhandled exception" and leaks
-    // threadpool work. Retained topics + reconnect catch the state back up.
     try
     {
-      await _client.PublishAsync(message, cancellationToken);
-      _logger.LogDebug("Published to {Topic}: {Payload}", topic, payload);
-    }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-      throw;
+      await _client.EnqueueAsync(message);
+      _logger.LogDebug("Queued publish to {Topic}: {Payload}", topic, payload);
     }
     catch (Exception ex)
     {
-      _logger.LogDebug(ex, "Failed to publish to {Topic} (will retry on next state change)", topic);
+      _logger.LogDebug(ex, "Failed to queue publish to {Topic}", topic);
     }
   }
 
@@ -539,7 +499,7 @@ public class MqttService : IMqttService
     };
   }
 
-  private async Task PublishHomeAssistantDiscoveryAsync(CancellationToken cancellationToken = default)
+  private async Task PublishHomeAssistantDiscoveryAsync()
   {
     _logger.LogInformation("Publishing Home Assistant discovery config");
 
@@ -570,8 +530,8 @@ public class MqttService : IMqttService
         device
       };
 
-      await PublishAsync($"{ha}/binary_sensor/digiplex/zone_{zoneId}/config",
-          JsonSerializer.Serialize(config, JsonOptions), true, cancellationToken);
+      await EnqueueAsync($"{ha}/binary_sensor/digiplex/zone_{zoneId}/config",
+          JsonSerializer.Serialize(config, JsonOptions), true);
     }
 
     // Partition alarm control panels
@@ -581,7 +541,7 @@ public class MqttService : IMqttService
           $"partition_{partitionId}",
           string.IsNullOrEmpty(partition.Label) ? $"Partition {partitionId}" : partition.Label,
           $"{prefix}/partition/{partitionId}",
-          device, cancellationToken);
+          device);
 
       // Beep button per partition
       var beepConfig = new
@@ -595,8 +555,8 @@ public class MqttService : IMqttService
         device
       };
 
-      await PublishAsync($"{ha}/button/digiplex/partition_{partitionId}_beep/config",
-          JsonSerializer.Serialize(beepConfig, JsonOptions), true, cancellationToken);
+      await EnqueueAsync($"{ha}/button/digiplex/partition_{partitionId}_beep/config",
+          JsonSerializer.Serialize(beepConfig, JsonOptions), true);
     }
 
     // Group alarm control panels
@@ -606,11 +566,11 @@ public class MqttService : IMqttService
           $"group_{group.Id}",
           group.Label,
           $"{prefix}/group/{group.Id}",
-          device, cancellationToken);
+          device);
     }
 
     // Panel voltage sensor (diagnostic)
-    await PublishAsync($"{ha}/sensor/digiplex/panel_vdc/config", JsonSerializer.Serialize(new
+    await EnqueueAsync($"{ha}/sensor/digiplex/panel_vdc/config", JsonSerializer.Serialize(new
     {
       name = "Panel Voltage",
       unique_id = "digiplex_panel_vdc",
@@ -621,10 +581,10 @@ public class MqttService : IMqttService
       entity_category = "diagnostic",
       availability_topic = $"{prefix}/status",
       device
-    }, JsonOptions), true, cancellationToken);
+    }, JsonOptions), true);
 
     // Battery voltage sensor (diagnostic)
-    await PublishAsync($"{ha}/sensor/digiplex/panel_battery/config", JsonSerializer.Serialize(new
+    await EnqueueAsync($"{ha}/sensor/digiplex/panel_battery/config", JsonSerializer.Serialize(new
     {
       name = "Battery Voltage",
       unique_id = "digiplex_panel_battery",
@@ -635,10 +595,10 @@ public class MqttService : IMqttService
       entity_category = "diagnostic",
       availability_topic = $"{prefix}/status",
       device
-    }, JsonOptions), true, cancellationToken);
+    }, JsonOptions), true);
 
     // DC output voltage sensor (diagnostic)
-    await PublishAsync($"{ha}/sensor/digiplex/panel_dc/config", JsonSerializer.Serialize(new
+    await EnqueueAsync($"{ha}/sensor/digiplex/panel_dc/config", JsonSerializer.Serialize(new
     {
       name = "DC Voltage",
       unique_id = "digiplex_panel_dc",
@@ -649,10 +609,10 @@ public class MqttService : IMqttService
       entity_category = "diagnostic",
       availability_topic = $"{prefix}/status",
       device
-    }, JsonOptions), true, cancellationToken);
+    }, JsonOptions), true);
 
     // Trouble flags sensor (diagnostic)
-    await PublishAsync($"{ha}/sensor/digiplex/panel_trouble/config", JsonSerializer.Serialize(new
+    await EnqueueAsync($"{ha}/sensor/digiplex/panel_trouble/config", JsonSerializer.Serialize(new
     {
       name = "Trouble Flags",
       unique_id = "digiplex_panel_trouble",
@@ -660,12 +620,11 @@ public class MqttService : IMqttService
       entity_category = "diagnostic",
       availability_topic = $"{prefix}/status",
       device
-    }, JsonOptions), true, cancellationToken);
+    }, JsonOptions), true);
   }
 
   private async Task PublishAlarmPanelDiscoveryAsync(
-      string uniqueSuffix, string name, string baseTopic,
-      object device, CancellationToken cancellationToken)
+      string uniqueSuffix, string name, string baseTopic, object device)
   {
     var ha = _options.HomeAssistantDiscoveryPrefix;
 
@@ -690,8 +649,8 @@ public class MqttService : IMqttService
       configDict["code_trigger_required"] = false;
     }
 
-    await PublishAsync($"{ha}/alarm_control_panel/digiplex/{uniqueSuffix}/config",
-        JsonSerializer.Serialize(configDict, JsonOptions), true, cancellationToken);
+    await EnqueueAsync($"{ha}/alarm_control_panel/digiplex/{uniqueSuffix}/config",
+        JsonSerializer.Serialize(configDict, JsonOptions), true);
   }
 
   public async ValueTask DisposeAsync()
