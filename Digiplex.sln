@@ -11,6 +11,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Digiplex.Mqtt", "Digiplex.M
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Digiplex.Worker", "Digiplex.Worker\Digiplex.Worker.csproj", "{F3A7129B-203E-48AE-825F-91996143EF08}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Digiplex.Tests", "Digiplex.Tests\Digiplex.Tests.csproj", "{356D211D-2FD5-4110-912D-4D701BFA770A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -69,6 +71,18 @@ Global
 		{F3A7129B-203E-48AE-825F-91996143EF08}.Release|x64.Build.0 = Release|Any CPU
 		{F3A7129B-203E-48AE-825F-91996143EF08}.Release|x86.ActiveCfg = Release|Any CPU
 		{F3A7129B-203E-48AE-825F-91996143EF08}.Release|x86.Build.0 = Release|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Debug|x64.Build.0 = Debug|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Debug|x86.Build.0 = Debug|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Release|x64.ActiveCfg = Release|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Release|x64.Build.0 = Release|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Release|x86.ActiveCfg = Release|Any CPU
+		{356D211D-2FD5-4110-912D-4D701BFA770A}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
