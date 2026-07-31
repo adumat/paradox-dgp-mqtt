@@ -6,8 +6,9 @@ COPY Digiplex.Core/*.csproj Digiplex.Core/
 COPY Digiplex.Serial/*.csproj Digiplex.Serial/
 COPY Digiplex.Mqtt/*.csproj Digiplex.Mqtt/
 COPY Digiplex.Worker/*.csproj Digiplex.Worker/
-COPY Digiplex.sln .
-RUN dotnet restore
+# Restore only the Worker (+ its transitive project refs) — NOT the whole solution,
+# which now also contains Digiplex.Tests (test project, not part of the image).
+RUN dotnet restore Digiplex.Worker/Digiplex.Worker.csproj
 
 COPY . .
 
