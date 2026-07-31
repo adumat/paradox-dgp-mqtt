@@ -49,6 +49,9 @@ public class MqttService : IMqttService
 
   private IManagedMqttClient? _client;
   private readonly List<IDisposable> _subscriptions = [];
+  private System.Threading.Channels.Channel<PublishItem>? _publishChannel;
+  private Task? _publishTask;
+  private CancellationTokenSource? _publishCts;
   private Timer? _discoveryTimer;
   private volatile bool _stopping;
 
@@ -107,6 +110,14 @@ public class MqttService : IMqttService
         .WithMaxPendingMessages(1000)
         .Build();
 
+    // A single serialized publish pipeline: state changes queue synchronously
+    // (EnqueuePublish, never blocking the serial thread), the pump sends them in order.
+    _publishChannel = System.Threading.Channels.Channel.CreateUnbounded<PublishItem>(
+        new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+    _publishCts = new CancellationTokenSource();
+    _publishTask = Task.Run(() => PublishPump.RunAsync(
+        _publishChannel.Reader, SendAsync, _logger, _publishCts.Token));
+
     SubscribeToStateChanges();
 
     // StartAsync connects in the background and keeps the connection alive; it does
@@ -128,23 +139,34 @@ public class MqttService : IMqttService
     _discoveryTimer?.Dispose();
     _discoveryTimer = null;
 
+    // Queue the final "offline", then close + drain the pump so it is actually sent
+    // before we tear the client down.
+    if (_client is { IsConnected: true })
+      EnqueuePublish($"{_options.TopicPrefix}/status", "offline", true);
+
+    _publishChannel?.Writer.Complete();
+    if (_publishTask != null)
+      await _publishTask;
+    _publishCts?.Dispose();
+    _publishCts = null;
+    _publishChannel = null;
+    _publishTask = null;
+
     if (_client != null)
     {
-      if (_client.IsConnected)
-        await EnqueueAsync($"{_options.TopicPrefix}/status", "offline", true);
-
       await _client.StopAsync();
       _client.Dispose();
       _client = null;
     }
   }
 
-  private async Task OnConnectedAsync(MqttClientConnectedEventArgs args)
+  private Task OnConnectedAsync(MqttClientConnectedEventArgs args)
   {
     _logger.LogInformation("Connected to MQTT broker");
     // (Re)publish online status on every (re)connect. Command-topic subscriptions
     // are restored automatically by the managed client.
-    await EnqueueAsync($"{_options.TopicPrefix}/status", "online", true);
+    EnqueuePublish($"{_options.TopicPrefix}/status", "online", true);
+    return Task.CompletedTask;
   }
 
   private Task OnDisconnectedAsync(MqttClientDisconnectedEventArgs args)
@@ -163,7 +185,7 @@ public class MqttService : IMqttService
     return Task.CompletedTask;
   }
 
-  private async Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args)
+  private Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args)
   {
     var topic = args.ApplicationMessage.Topic;
     var payload = args.ApplicationMessage.ConvertPayloadToString() ?? string.Empty;
@@ -237,9 +259,11 @@ public class MqttService : IMqttService
       var systemStatus = _state.SystemStatus;
       if (systemStatus != null)
       {
-        await EnqueueAsync($"{_options.TopicPrefix}/panel/time", systemStatus.PanelTime.ToString("o"), false);
+        EnqueuePublish($"{_options.TopicPrefix}/panel/time", systemStatus.PanelTime.ToString("o"), false);
       }
     }
+
+    return Task.CompletedTask;
   }
 
   private static byte? MapHaCommandToMonitoring(string haCommand)
@@ -287,107 +311,132 @@ public class MqttService : IMqttService
 
   private void SubscribeToStateChanges()
   {
+    // Subscriptions are SYNCHRONOUS: they compute topic/payload and queue via
+    // EnqueuePublish (never blocking, no async void); the pump does the sending.
+    // Each body is try/catch'd so a mapping error can't tear down the subscription.
+
     // Subscribe to connection state changes
-    _subscriptions.Add(_state.ConnectionStateChanged.Subscribe(async state =>
+    _subscriptions.Add(_state.ConnectionStateChanged.Subscribe(state =>
     {
-      await EnqueueAsync($"{_options.TopicPrefix}/connection", state.ToString().ToLower(), true);
+      try { EnqueuePublish($"{_options.TopicPrefix}/connection", state.ToString().ToLower(), true); }
+      catch (Exception ex) { _logger.LogWarning(ex, "connection publish failed"); }
     }));
 
     // Subscribe to zone changes
-    _subscriptions.Add(_state.ZoneChanged.Subscribe(async evt =>
+    _subscriptions.Add(_state.ZoneChanged.Subscribe(evt =>
     {
-      var topic = $"{_options.TopicPrefix}/zone/{evt.ZoneId}";
-      var payload = JsonSerializer.Serialize(new
+      try
       {
-        zone_id = evt.ZoneId,
-        label = evt.NewStatus.Label,
-        state = evt.NewStatus.State.ToString().ToLower()
-      }, JsonOptions);
+        var topic = $"{_options.TopicPrefix}/zone/{evt.ZoneId}";
+        var payload = JsonSerializer.Serialize(new
+        {
+          zone_id = evt.ZoneId,
+          label = evt.NewStatus.Label,
+          state = evt.NewStatus.State.ToString().ToLower()
+        }, JsonOptions);
 
-      await EnqueueAsync(topic, payload, true);
+        EnqueuePublish(topic, payload, true);
 
-      // Also publish simple state for Home Assistant binary sensors
-      await EnqueueAsync($"{topic}/state", evt.NewStatus.State == ZoneState.Ok ? "OFF" : "ON", true);
+        // Also publish simple state for Home Assistant binary sensors
+        EnqueuePublish($"{topic}/state", evt.NewStatus.State == ZoneState.Ok ? "OFF" : "ON", true);
+      }
+      catch (Exception ex) { _logger.LogWarning(ex, "zone publish failed"); }
     }));
 
     // Subscribe to partition changes
-    _subscriptions.Add(_state.PartitionChanged.Subscribe(async evt =>
+    _subscriptions.Add(_state.PartitionChanged.Subscribe(evt =>
     {
-      var topic = $"{_options.TopicPrefix}/partition/{evt.PartitionId}";
-      var payload = JsonSerializer.Serialize(new
+      try
       {
-        partition_id = evt.PartitionId,
-        label = evt.NewStatus.Label,
-        arm_state = evt.NewStatus.ArmState.ToString().ToLower(),
-        in_alarm = evt.NewStatus.InAlarm,
-        ready = evt.NewStatus.Ready,
-        exit_delay = evt.NewStatus.ExitDelay,
-        entry_delay = evt.NewStatus.EntryDelay,
-        alarm_in_memory = evt.NewStatus.AlarmInMemory
-      }, JsonOptions);
-
-      await EnqueueAsync(topic, payload, true);
-
-      // Publish HA alarm state string
-      var haState = MapToHaState(evt.NewStatus);
-      await EnqueueAsync($"{topic}/state", haState, true);
-
-      // Update group states for any group containing this partition
-      foreach (var group in _partitionConfig.Groups)
-      {
-        if (group.PartitionIds.Contains(evt.PartitionId))
+        var topic = $"{_options.TopicPrefix}/partition/{evt.PartitionId}";
+        var payload = JsonSerializer.Serialize(new
         {
-          await PublishGroupStateAsync(group);
+          partition_id = evt.PartitionId,
+          label = evt.NewStatus.Label,
+          arm_state = evt.NewStatus.ArmState.ToString().ToLower(),
+          in_alarm = evt.NewStatus.InAlarm,
+          ready = evt.NewStatus.Ready,
+          exit_delay = evt.NewStatus.ExitDelay,
+          entry_delay = evt.NewStatus.EntryDelay,
+          alarm_in_memory = evt.NewStatus.AlarmInMemory
+        }, JsonOptions);
+
+        EnqueuePublish(topic, payload, true);
+
+        // Publish HA alarm state string
+        var haState = MapToHaState(evt.NewStatus);
+        EnqueuePublish($"{topic}/state", haState, true);
+
+        // Update group states for any group containing this partition
+        foreach (var group in _partitionConfig.Groups)
+        {
+          if (group.PartitionIds.Contains(evt.PartitionId))
+          {
+            PublishGroupState(group);
+          }
         }
       }
+      catch (Exception ex) { _logger.LogWarning(ex, "partition publish failed"); }
     }));
 
     // Subscribe to system status changes
-    _subscriptions.Add(_state.SystemStatusChanged.Subscribe(async status =>
+    _subscriptions.Add(_state.SystemStatusChanged.Subscribe(status =>
     {
-      var payload = JsonSerializer.Serialize(new
+      try
       {
-        vdc = status.Vdc,
-        battery = status.BatteryVoltage,
-        dc_voltage = status.DcVoltage,
-        trouble = status.TroubleFlags
-      }, JsonOptions);
+        var payload = JsonSerializer.Serialize(new
+        {
+          vdc = status.Vdc,
+          battery = status.BatteryVoltage,
+          dc_voltage = status.DcVoltage,
+          trouble = status.TroubleFlags
+        }, JsonOptions);
 
-      await EnqueueAsync($"{_options.TopicPrefix}/panel/status", payload, true);
+        EnqueuePublish($"{_options.TopicPrefix}/panel/status", payload, true);
 
-      // Publish individual sensor values for HA
-      await EnqueueAsync($"{_options.TopicPrefix}/panel/vdc", status.Vdc.ToString("F1"), true);
-      await EnqueueAsync($"{_options.TopicPrefix}/panel/battery", status.BatteryVoltage.ToString("F1"), true);
-      await EnqueueAsync($"{_options.TopicPrefix}/panel/dc", status.DcVoltage.ToString("F1"), true);
-      await EnqueueAsync($"{_options.TopicPrefix}/panel/trouble", status.TroubleFlags.ToString(), true);
+        // Publish individual sensor values for HA
+        EnqueuePublish($"{_options.TopicPrefix}/panel/vdc", status.Vdc.ToString("F1"), true);
+        EnqueuePublish($"{_options.TopicPrefix}/panel/battery", status.BatteryVoltage.ToString("F1"), true);
+        EnqueuePublish($"{_options.TopicPrefix}/panel/dc", status.DcVoltage.ToString("F1"), true);
+        EnqueuePublish($"{_options.TopicPrefix}/panel/trouble", status.TroubleFlags.ToString(), true);
+      }
+      catch (Exception ex) { _logger.LogWarning(ex, "system status publish failed"); }
     }));
 
     // Publish HA discovery when serial data is ready (and on reconnects)
     if (_options.EnableHomeAssistantDiscovery)
     {
-      _subscriptions.Add(_state.DataReady.Subscribe(async _ =>
+      _subscriptions.Add(_state.DataReady.Subscribe(_ =>
       {
-        _logger.LogInformation("Panel data ready, publishing HA discovery");
-        await PublishHomeAssistantDiscoveryAsync();
-        RestartDiscoveryTimer();
+        try
+        {
+          _logger.LogInformation("Panel data ready, publishing HA discovery");
+          PublishHomeAssistantDiscovery();
+          RestartDiscoveryTimer();
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "discovery publish failed"); }
       }));
     }
 
     // Subscribe to panel info changes
-    _subscriptions.Add(_state.PanelInfoChanged.Subscribe(async info =>
+    _subscriptions.Add(_state.PanelInfoChanged.Subscribe(info =>
     {
-      var payload = JsonSerializer.Serialize(new
+      try
       {
-        product = info.GetProductName(),
-        software_version = info.GetSoftwareVersionString(),
-        serial_number = info.ModuleSerialNumber
-      }, JsonOptions);
+        var payload = JsonSerializer.Serialize(new
+        {
+          product = info.GetProductName(),
+          software_version = info.GetSoftwareVersionString(),
+          serial_number = info.ModuleSerialNumber
+        }, JsonOptions);
 
-      await EnqueueAsync($"{_options.TopicPrefix}/panel/info", payload, true);
+        EnqueuePublish($"{_options.TopicPrefix}/panel/info", payload, true);
+      }
+      catch (Exception ex) { _logger.LogWarning(ex, "panel info publish failed"); }
     }));
   }
 
-  private async Task PublishGroupStateAsync(PartitionGroup group)
+  private void PublishGroupState(PartitionGroup group)
   {
     var members = group.PartitionIds
         .Select(id => _state.Partitions.GetValueOrDefault(id))
@@ -411,8 +460,8 @@ public class MqttService : IMqttService
       })
     }, JsonOptions);
 
-    await EnqueueAsync(topic, payload, true);
-    await EnqueueAsync($"{topic}/state", groupState, true);
+    EnqueuePublish(topic, payload, true);
+    EnqueuePublish($"{topic}/state", groupState, true);
   }
 
   private static string AggregateGroupState(List<PartitionStatus> members)
@@ -446,12 +495,12 @@ public class MqttService : IMqttService
     if (hours <= 0) return;
 
     var interval = TimeSpan.FromHours(hours);
-    _discoveryTimer = new Timer(async _ =>
+    _discoveryTimer = new Timer(_ =>
     {
       try
       {
         _logger.LogInformation("Periodic HA discovery re-publish");
-        await PublishHomeAssistantDiscoveryAsync();
+        PublishHomeAssistantDiscovery();
       }
       catch (Exception ex)
       {
@@ -465,26 +514,23 @@ public class MqttService : IMqttService
   /// survives short disconnects, so callers never block on — or throw from — a
   /// mid-flight broker drop. Retained topics + reconnect bring state back up.
   /// </summary>
-  private async Task EnqueueAsync(string topic, string payload, bool retain)
+  /// <summary>Synchronously queue a publish. Never blocks; the pump sends it in order.</summary>
+  private void EnqueuePublish(string topic, string payload, bool retain)
+      => _publishChannel?.Writer.TryWrite(new PublishItem(topic, payload, retain));
+
+  /// <summary>The actual publish onto the managed client's queue. Called only by the pump.</summary>
+  private Task SendAsync(PublishItem item)
   {
-    if (_client == null) return;
+    if (_client == null) return Task.CompletedTask;
 
     var message = new MqttApplicationMessageBuilder()
-        .WithTopic(topic)
-        .WithPayload(payload)
-        .WithRetainFlag(retain)
+        .WithTopic(item.Topic)
+        .WithPayload(item.Payload)
+        .WithRetainFlag(item.Retain)
         .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
         .Build();
 
-    try
-    {
-      await _client.EnqueueAsync(message);
-      _logger.LogDebug("Queued publish to {Topic}: {Payload}", topic, payload);
-    }
-    catch (Exception ex)
-    {
-      _logger.LogDebug(ex, "Failed to queue publish to {Topic}", topic);
-    }
+    return _client.EnqueueAsync(message);
   }
 
   private object GetDeviceConfig()
@@ -499,7 +545,7 @@ public class MqttService : IMqttService
     };
   }
 
-  private async Task PublishHomeAssistantDiscoveryAsync()
+  private void PublishHomeAssistantDiscovery()
   {
     _logger.LogInformation("Publishing Home Assistant discovery config");
 
@@ -530,14 +576,14 @@ public class MqttService : IMqttService
         device
       };
 
-      await EnqueueAsync($"{ha}/binary_sensor/digiplex/zone_{zoneId}/config",
+      EnqueuePublish($"{ha}/binary_sensor/digiplex/zone_{zoneId}/config",
           JsonSerializer.Serialize(config, JsonOptions), true);
     }
 
     // Partition alarm control panels
     foreach (var (partitionId, partition) in _state.Partitions)
     {
-      await PublishAlarmPanelDiscoveryAsync(
+      PublishAlarmPanelDiscovery(
           $"partition_{partitionId}",
           string.IsNullOrEmpty(partition.Label) ? $"Partition {partitionId}" : partition.Label,
           $"{prefix}/partition/{partitionId}",
@@ -555,14 +601,14 @@ public class MqttService : IMqttService
         device
       };
 
-      await EnqueueAsync($"{ha}/button/digiplex/partition_{partitionId}_beep/config",
+      EnqueuePublish($"{ha}/button/digiplex/partition_{partitionId}_beep/config",
           JsonSerializer.Serialize(beepConfig, JsonOptions), true);
     }
 
     // Group alarm control panels
     foreach (var group in _partitionConfig.Groups)
     {
-      await PublishAlarmPanelDiscoveryAsync(
+      PublishAlarmPanelDiscovery(
           $"group_{group.Id}",
           group.Label,
           $"{prefix}/group/{group.Id}",
@@ -570,7 +616,7 @@ public class MqttService : IMqttService
     }
 
     // Panel voltage sensor (diagnostic)
-    await EnqueueAsync($"{ha}/sensor/digiplex/panel_vdc/config", JsonSerializer.Serialize(new
+    EnqueuePublish($"{ha}/sensor/digiplex/panel_vdc/config", JsonSerializer.Serialize(new
     {
       name = "Panel Voltage",
       unique_id = "digiplex_panel_vdc",
@@ -584,7 +630,7 @@ public class MqttService : IMqttService
     }, JsonOptions), true);
 
     // Battery voltage sensor (diagnostic)
-    await EnqueueAsync($"{ha}/sensor/digiplex/panel_battery/config", JsonSerializer.Serialize(new
+    EnqueuePublish($"{ha}/sensor/digiplex/panel_battery/config", JsonSerializer.Serialize(new
     {
       name = "Battery Voltage",
       unique_id = "digiplex_panel_battery",
@@ -598,7 +644,7 @@ public class MqttService : IMqttService
     }, JsonOptions), true);
 
     // DC output voltage sensor (diagnostic)
-    await EnqueueAsync($"{ha}/sensor/digiplex/panel_dc/config", JsonSerializer.Serialize(new
+    EnqueuePublish($"{ha}/sensor/digiplex/panel_dc/config", JsonSerializer.Serialize(new
     {
       name = "DC Voltage",
       unique_id = "digiplex_panel_dc",
@@ -612,7 +658,7 @@ public class MqttService : IMqttService
     }, JsonOptions), true);
 
     // Trouble flags sensor (diagnostic)
-    await EnqueueAsync($"{ha}/sensor/digiplex/panel_trouble/config", JsonSerializer.Serialize(new
+    EnqueuePublish($"{ha}/sensor/digiplex/panel_trouble/config", JsonSerializer.Serialize(new
     {
       name = "Trouble Flags",
       unique_id = "digiplex_panel_trouble",
@@ -623,7 +669,7 @@ public class MqttService : IMqttService
     }, JsonOptions), true);
   }
 
-  private async Task PublishAlarmPanelDiscoveryAsync(
+  private void PublishAlarmPanelDiscovery(
       string uniqueSuffix, string name, string baseTopic, object device)
   {
     var ha = _options.HomeAssistantDiscoveryPrefix;
@@ -649,7 +695,7 @@ public class MqttService : IMqttService
       configDict["code_trigger_required"] = false;
     }
 
-    await EnqueueAsync($"{ha}/alarm_control_panel/digiplex/{uniqueSuffix}/config",
+    EnqueuePublish($"{ha}/alarm_control_panel/digiplex/{uniqueSuffix}/config",
         JsonSerializer.Serialize(configDict, JsonOptions), true);
   }
 
