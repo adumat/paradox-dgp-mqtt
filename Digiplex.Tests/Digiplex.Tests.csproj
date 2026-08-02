@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Digiplex.Core\Digiplex.Core.csproj" />
     <ProjectReference Include="..\Digiplex.Mqtt\Digiplex.Mqtt.csproj" />
   </ItemGroup>
 
