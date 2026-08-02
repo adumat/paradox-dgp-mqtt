@@ -34,7 +34,7 @@ public class SerialService : ISerialService
 
   private SerialPort? _serialPort;
   private CancellationTokenSource? _cts;
-  private Task? _pollingTask;
+  private Task? _connectionTask;
   private IDisposable? _commandSubscription;
   private IDisposable? _multiCommandSubscription;
   private readonly SemaphoreSlim _sendLock = new(1, 1);
@@ -63,11 +63,56 @@ public class SerialService : ISerialService
     _state = state;
   }
 
-  public async Task StartAsync(CancellationToken cancellationToken = default)
+  public Task StartAsync(CancellationToken cancellationToken = default)
   {
     _logger.LogInformation("Starting serial service on {Port}", _options.PortName);
     _state.SetConnectionState(ConnectionState.Connecting);
 
+    _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+    // Subscribe to partition commands once; the handlers use whichever port is currently open.
+    _commandSubscription = _state.PartitionCommandRequested.Subscribe(async cmd =>
+    {
+      try
+      {
+        await SendPartitionCommandAsync(cmd);
+      }
+      catch (Exception ex)
+      {
+        _logger.LogError(ex, "Error sending partition command {Command} to partition {Partition}",
+            cmd.Command, cmd.PartitionId);
+      }
+    });
+
+    // Subscribe to multi-partition commands (macro groups).
+    _multiCommandSubscription = _state.MultiPartitionCommandRequested.Subscribe(async cmd =>
+    {
+      try
+      {
+        await SendMultiPartitionCommandAsync(cmd);
+      }
+      catch (Exception ex)
+      {
+        _logger.LogError(ex, "Error sending multi-partition command");
+      }
+    });
+
+    // Self-healing connection loop: open + init + login + poll, retrying with backoff on any
+    // failure. Never throws out of StartAsync, so a stale panel session on restart cannot crash
+    // the host — it just retries until the panel accepts the session.
+    _connectionTask = Task.Run(() => ReconnectLoop.RunAsync(
+        OpenInitAndServeAsync,
+        TimeSpan.FromSeconds(1),
+        TimeSpan.FromSeconds(30),
+        (d, c) => Task.Delay(d, c),
+        _logger,
+        _cts.Token));
+
+    return Task.CompletedTask;
+  }
+
+  private async Task OpenInitAndServeAsync(Action onConnected, CancellationToken cancellationToken)
+  {
     try
     {
       _serialPort = new SerialPort(
@@ -87,45 +132,24 @@ public class SerialService : ISerialService
 
       _logger.LogInformation("Serial port opened successfully");
 
-      // Initialize connection
+      // Initialise + login. Sets ConnectionState.Connected on success; throws on an unexpected PDU
+      // (e.g. the panel's previous session is still open right after a container swap).
       await InitializeConnectionAsync(cancellationToken);
 
-      // Subscribe to partition commands
-      _commandSubscription = _state.PartitionCommandRequested.Subscribe(async cmd =>
-      {
-        try
-        {
-          await SendPartitionCommandAsync(cmd);
-        }
-        catch (Exception ex)
-        {
-          _logger.LogError(ex, "Error sending partition command {Command} to partition {Partition}",
-              cmd.Command, cmd.PartitionId);
-        }
-      });
+      // Fully connected — reset the reconnect backoff so a later mid-run drop retries quickly.
+      onConnected();
 
-      // Subscribe to multi-partition commands (macro groups)
-      _multiCommandSubscription = _state.MultiPartitionCommandRequested.Subscribe(async cmd =>
-      {
-        try
-        {
-          await SendMultiPartitionCommandAsync(cmd);
-        }
-        catch (Exception ex)
-        {
-          _logger.LogError(ex, "Error sending multi-partition command");
-        }
-      });
-
-      // Start polling loop
-      _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-      _pollingTask = Task.Run(() => PollingLoopAsync(_cts.Token), _cts.Token);
+      // Serve until cancelled or a failure surfaces (which unwinds to ReconnectLoop for a retry).
+      await PollingLoopAsync(cancellationToken);
     }
-    catch (Exception ex)
+    finally
     {
-      _logger.LogError(ex, "Failed to start serial service");
-      _state.SetConnectionState(ConnectionState.Error);
-      throw;
+      if (_serialPort?.IsOpen == true)
+      {
+        _serialPort.Close();
+      }
+      _serialPort?.Dispose();
+      _serialPort = null;
     }
   }
 
@@ -144,11 +168,11 @@ public class SerialService : ISerialService
     if (_cts != null)
     {
       await _cts.CancelAsync();
-      if (_pollingTask != null)
+      if (_connectionTask != null)
       {
         try
         {
-          await _pollingTask.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+          await _connectionTask.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -391,12 +415,6 @@ public class SerialService : ISerialService
       catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
       {
         break;
-      }
-      catch (Exception ex)
-      {
-        _logger.LogError(ex, "Error in polling loop");
-        _state.SetConnectionState(ConnectionState.Error);
-        await Task.Delay(5000, cancellationToken);
       }
     }
 
