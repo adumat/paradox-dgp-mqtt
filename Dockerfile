@@ -1,5 +1,5 @@
 # === Shared build stage ===
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build-base
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build-base
 WORKDIR /src
 
 COPY Digiplex.Core/*.csproj Digiplex.Core/
@@ -26,7 +26,7 @@ FROM build-base AS build-debug
 RUN dotnet publish Digiplex.Worker -c Debug -o /app/publish --no-restore
 
 # === Shared runtime base ===
-FROM mcr.microsoft.com/dotnet/runtime:9.0 AS runtime-base
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime-base
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
