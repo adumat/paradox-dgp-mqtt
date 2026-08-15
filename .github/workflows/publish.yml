@@ -45,7 +45,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push release image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: release
@@ -62,7 +62,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=release
 
       - name: Build and push debug image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: debug
